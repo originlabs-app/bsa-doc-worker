@@ -106,8 +106,7 @@ const DocumentRowSchema = z.object({
 }).passthrough();
 
 function throwSupabaseError(error: unknown, fallback: string): never {
-  if (error instanceof Error) throw error;
-  throw new Error(fallback);
+  throw new Error(fallback, { cause: error });
 }
 
 function checked(result: SupabaseResult, fallback: string): unknown {
@@ -279,6 +278,7 @@ async function assembleCandidate(
     assembly: {
       queue: candidate,
       companyId: tender.company_id,
+      recordType: tender.record_type,
       existingScore: finiteNumber(tender.relevance_score),
       coverage: {
         complete: omittedDocuments === 0,
@@ -370,7 +370,7 @@ async function writeAnalysis(
   const analysisState = assembly.coverage.complete
     ? "documentary_complete"
     : "documentary_partial";
-  if (payload.lots.length > 0) {
+  if (assembly.recordType === "market" && payload.lots.length > 0) {
     const result = await client.rpc("sync_tender_lot_analysis", {
       p_parent_tender_id: payload.tenderId,
       p_analysis_state: analysisState,

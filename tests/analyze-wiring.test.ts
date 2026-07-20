@@ -16,6 +16,7 @@ import {
 const assembly: AnalyzeDossierAssembly = {
   queue: { queueId: "queue-1", tenderId: "tender-1", attempts: 0 },
   companyId: "company-1",
+  recordType: "market",
   existingScore: 72,
   coverage: {
     complete: true,
@@ -219,6 +220,29 @@ describe("runAnalyzeOneShot", () => {
     expect(writes.markDone).toHaveBeenCalledWith(
       "queue-1",
       "2026-07-20T20:00:00.000Z",
+    );
+  });
+
+  it("does not expose provider error bodies in operational issues", async () => {
+    const logger = { info: vi.fn() };
+    const report = await runAnalyzeOneShot(config("shadow"), {
+      readStore: readStore(),
+      client: {
+        generate: vi.fn().mockRejectedValue(
+          new Error("https://provider.example/error?token=secret"),
+        ),
+      },
+      recallLearning: vi.fn().mockResolvedValue(learning),
+      logger,
+    });
+
+    expect(report).toMatchObject({
+      status: "failed",
+      issue: "ANALYZE_FAILED",
+    });
+    expect(logger.info).toHaveBeenCalledWith(
+      "analyze_one_shot_failed",
+      expect.objectContaining({ issue: "ANALYZE_FAILED" }),
     );
   });
 });

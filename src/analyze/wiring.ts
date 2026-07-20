@@ -22,6 +22,7 @@ export interface AnalyzeQueueCandidate {
 export interface AnalyzeDossierAssembly {
   queue: AnalyzeQueueCandidate;
   companyId: string;
+  recordType: string | null;
   existingScore: number | null;
   dossier: AnalyzeDossierInput;
   coverage: {
@@ -84,8 +85,16 @@ export type AnalyzeOneShotReport =
     };
 
 function shortIssue(error: unknown): string {
+  const code = error && typeof error === "object" && "code" in error
+    ? (error as { code?: unknown }).code
+    : undefined;
+  if (typeof code === "string" && /^[A-Z][A-Z0-9_]{2,100}$/.test(code)) {
+    return code;
+  }
   const message = error instanceof Error ? error.message : String(error);
-  return message.replace(/[\r\n]+/g, " ").slice(0, 500) || "ANALYZE_FAILED";
+  return /^[A-Z][A-Z0-9_]{2,100}$/.test(message)
+    ? message
+    : "ANALYZE_FAILED";
 }
 
 function logShadowResult(input: {

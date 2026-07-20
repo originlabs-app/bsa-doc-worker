@@ -61,4 +61,16 @@ describe("runAnalyzeCli", () => {
     }, { dependencyFactory })).resolves.toBe(1);
     expect(dependencyFactory).not.toHaveBeenCalled();
   });
+
+  it("rejects a non-local Supabase URL without HTTPS", async () => {
+    const dependencyFactory = vi.fn();
+
+    await expect(runAnalyzeCli({
+      ANALYZE_MODE: "shadow",
+      SUPABASE_URL: "http://example.supabase.co",
+      SUPABASE_SERVICE_ROLE_KEY: "service-role",
+      OPENROUTER_API_KEY: "openrouter",
+    }, { dependencyFactory })).resolves.toBe(1);
+    expect(dependencyFactory).not.toHaveBeenCalled();
+  });
 });

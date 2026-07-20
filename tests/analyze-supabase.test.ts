@@ -48,6 +48,7 @@ function fixtureClient(input: {
   queue?: unknown[];
   documents?: unknown[];
   text?: string;
+  downloadError?: unknown;
 }) {
   const operations = new Map<string, QueryOperation[]>();
   const updates: Array<{ table: string; values: unknown }> = [];
@@ -82,7 +83,7 @@ function fixtureClient(input: {
   });
   const download = vi.fn(async () => ({
     data: new Blob([input.text ?? "Texte extrait du CCTP"]),
-    error: null,
+    error: input.downloadError ?? null,
   }));
   const client = {
     from,
@@ -272,6 +273,20 @@ describe("Supabase ANALYZE read adapter", () => {
       "ANALYZE_DOCUMENT_TEXT_EMPTY",
     );
   });
+
+  it("replaces external Storage errors with a short non-sensitive issue", async () => {
+    const fixture = fixtureClient({
+      tender,
+      company,
+      documents: [document],
+      downloadError: new Error("https://signed.example/private?token=secret"),
+    });
+    const store = createSupabaseAnalyzeStore(fixture.client);
+
+    await expect(store.assembleCandidate(candidate)).rejects.toThrow(
+      "ANALYZE_DOCUMENT_TEXT_READ_FAILED",
+    );
+  });
 });
 
 describe("Supabase ANALYZE apply contract", () => {
@@ -310,6 +325,7 @@ describe("Supabase ANALYZE apply contract", () => {
     await store.createResultSink({
       queue: candidate,
       companyId: "company-1",
+      recordType: "market",
       existingScore: 72,
       dossier: {
         tender: {
@@ -359,6 +375,72 @@ describe("Supabase ANALYZE apply contract", () => {
       { table: "tender", values: expect.objectContaining({ relevance_score: 100 }) },
       { table: "dce_analysis_queue", values: expect.objectContaining({ status: "done" }) },
     ]));
+  });
+
+  it("does not call the market-parent lot sync for a direct lot analysis", async () => {
+    const fixture = fixtureClient({ tender, company });
+    const store = createSupabaseAnalyzeStore(fixture.client);
+    await store.createResultSink({
+      queue: candidate,
+      companyId: "company-1",
+      recordType: "lot",
+      existingScore: 72,
+      dossier: {
+        tender: {
+          id: "tender-1",
+          title: "Lot 1",
+          buyerName: null,
+          description: null,
+          location: null,
+          estimatedAmount: null,
+          procedureType: null,
+        },
+        company: {},
+        mandatoryQualifications: [],
+        documents: [],
+      },
+      coverage: {
+        complete: true,
+        documentsCount: 1,
+        omittedDocuments: 0,
+        totalCharacters: 10,
+      },
+    }).write({
+      tenderId: "tender-1",
+      tenderValues: { relevance_score: 80 },
+      lots: [{
+        number: "1",
+        title: "Lot direct",
+        relevanceScore: 80,
+        relevanceReason: "Fit",
+        verdict: "recommended",
+        forcedZero: false,
+        summary: {
+          scope: "Lot",
+          services: [],
+          requirements: [],
+          qualifications: [],
+          amounts: [],
+          watchpoints: [],
+        },
+      }],
+      ledger: {
+        tenderId: "tender-1",
+        step: "dce_scoring",
+        model: "model",
+        costUsd: 0.01,
+        metadata: {},
+      },
+    });
+
+    expect(fixture.rpc).not.toHaveBeenCalledWith(
+      "sync_tender_lot_analysis",
+      expect.anything(),
+    );
+    expect(fixture.rpc).toHaveBeenCalledWith(
+      "record_ai_spend",
+      expect.anything(),
+    );
   });
 });
 

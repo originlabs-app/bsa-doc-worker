@@ -41,13 +41,29 @@ function nonEmpty(value: string | undefined): string | undefined {
   return normalized ? normalized : undefined;
 }
 
+function safeSupabaseUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    if (url.protocol === "https:") return true;
+    return url.protocol === "http:" &&
+      ["localhost", "127.0.0.1", "::1"].includes(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
 function activeConfig(
   config: AnalyzeConfig,
   env: Readonly<Record<string, string | undefined>>,
 ): ActiveAnalyzeConfig | null {
   const supabaseUrl = nonEmpty(env.SUPABASE_URL);
   const supabaseServiceRoleKey = nonEmpty(env.SUPABASE_SERVICE_ROLE_KEY);
-  if (!config.openRouterApiKey || !supabaseUrl || !supabaseServiceRoleKey) {
+  if (
+    !config.openRouterApiKey ||
+    !supabaseUrl ||
+    !safeSupabaseUrl(supabaseUrl) ||
+    !supabaseServiceRoleKey
+  ) {
     return null;
   }
   return {
