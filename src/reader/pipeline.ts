@@ -77,10 +77,21 @@ export interface ReaderTickReport {
   results: ReaderDocumentReport[];
 }
 
-const accountedLlmSpend = new WeakSet<object>();
-
 class ReaderModeStoppedError extends Error {
   readonly code = "READER_MODE_STOPPED";
+}
+
+export class ReaderZipNoReadableLeafError extends Error {
+  readonly code = "READER_ZIP_NO_READABLE_LEAF";
+
+  constructor(
+    public readonly costUsd: number,
+    public readonly notes: ExtractionNote[],
+    options?: ErrorOptions,
+  ) {
+    super("READER_ZIP_NO_READABLE_LEAF", options);
+    this.name = "ReaderZipNoReadableLeafError";
+  }
 }
 
 function currentMode(
@@ -104,6 +115,7 @@ function shortIssue(error: unknown): string {
   if (error instanceof ReaderArchiveError) return error.code;
   if (error instanceof ReaderLlmInvalidOutputError) return error.code;
   if (error instanceof ReaderLlmProviderError) return error.code;
+  if (error instanceof ReaderZipNoReadableLeafError) return error.code;
   if (error instanceof ReaderModeStoppedError) return error.code;
   if (error instanceof ReaderClaimLostError) return error.code;
   if (error instanceof Error && /^[A-Z][A-Z0-9_]{2,80}$/.test(error.message)) {
@@ -112,7 +124,14 @@ function shortIssue(error: unknown): string {
   return "READER_PROCESSING_FAILED";
 }
 
-function failureNotes(claim: ClaimedDocument, issue: string): ExtractionNote[] {
+function failureNotes(
+  claim: ClaimedDocument,
+  issue: string,
+  error?: unknown,
+): ExtractionNote[] {
+  if (error instanceof ReaderZipNoReadableLeafError && error.notes.length) {
+    return error.notes;
+  }
   return [
     {
       entry: claim.file_name,
@@ -121,6 +140,16 @@ function failureNotes(claim: ClaimedDocument, issue: string): ExtractionNote[] {
       reason: issue,
     },
   ];
+}
+
+function leafKind(fileName: string): ExtractionNote["kind"] {
+  const name = fileName.toLowerCase();
+  if (name.endsWith(".pdf")) return "pdf";
+  if (name.endsWith(".docx")) return "docx";
+  if (name.endsWith(".doc")) return "doc";
+  if (/\.(csv|xls|xlsx|ods)$/.test(name)) return "spreadsheet";
+  if (name.endsWith(".zip")) return "zip";
+  return "unknown";
 }
 
 function sourceNotes(
@@ -320,6 +349,8 @@ async function processZipDocument(
   const notes = [...archive.notes];
   let totalCost = 0;
   let hasReadableChild = false;
+  let failedLeaves = 0;
+  let firstLeafError: unknown;
 
   for (const leaf of archive.leaves) {
     const fileName = names.get(leaf.entryPath) ?? sanitizeFileName(leaf.fileName);
@@ -335,17 +366,31 @@ async function processZipDocument(
         },
       );
     } catch (error) {
-      if (
-        mode === "apply" &&
+      const reason = shortIssue(error);
+      const failureCost =
         (error instanceof ReaderLlmInvalidOutputError ||
           error instanceof ReaderLlmProviderError) &&
         error.costUsd > 0
-      ) {
+          ? error.costUsd
+          : 0;
+      failedLeaves += 1;
+      firstLeafError ??= error;
+      totalCost += failureCost;
+      notes.push({
+        entry: leaf.entryPath,
+        kind: leafKind(leaf.fileName),
+        status: "failed",
+        bytes: leaf.bytes,
+        depth: leaf.depth,
+        reason,
+        ...(failureCost > 0 ? { costUsd: failureCost } : {}),
+      });
+      if (mode === "apply" && failureCost > 0) {
         await recordSpend(
           spendDraft({
             claim,
             config,
-            costUsd: error.costUsd,
+            costUsd: failureCost,
             fileName: leaf.fileName,
             role: fileRole ?? "inconnu",
             entryPath: leaf.entryPath,
@@ -353,9 +398,8 @@ async function processZipDocument(
           config,
           dependencies,
         );
-        accountedLlmSpend.add(error);
       }
-      throw error;
+      continue;
     }
     totalCost += result.modelCostUsd;
     notes.push(
@@ -415,6 +459,12 @@ async function processZipDocument(
         result.text,
       );
     }
+  }
+
+  if (failedLeaves > 0 && !hasReadableChild) {
+    throw new ReaderZipNoReadableLeafError(totalCost, notes, {
+      cause: firstLeafError,
+    });
   }
 
   const status: ExtractionStatus = hasReadableChild
@@ -538,7 +588,7 @@ async function processClaim(
         claim.queue_id,
         dependencies.workerId,
         issue,
-        failureNotes(claim, issue),
+        failureNotes(claim, issue, error),
       );
     } else {
       if (error instanceof ReaderDownloadError && error.code === "DOCUMENT_TOO_LARGE") {
@@ -622,11 +672,7 @@ async function processClaim(
           issue,
         };
       }
-      if (
-        error instanceof ReaderLlmInvalidOutputError &&
-        error.costUsd > 0 &&
-        !accountedLlmSpend.has(error)
-      ) {
+      if (error instanceof ReaderLlmInvalidOutputError && error.costUsd > 0) {
         await recordSpend(
           spendDraft({
             claim,
@@ -640,7 +686,7 @@ async function processClaim(
         );
       }
       if (error instanceof ReaderLlmProviderError) {
-        if (error.costUsd > 0 && !accountedLlmSpend.has(error)) {
+        if (error.costUsd > 0) {
           await recordSpend(
             spendDraft({
               claim,
@@ -681,7 +727,7 @@ async function processClaim(
         claim.queue_id,
         dependencies.workerId,
         issue,
-        failureNotes(claim, issue),
+        failureNotes(claim, issue, error),
       );
     }
     return {
@@ -690,7 +736,10 @@ async function processClaim(
       documentId: claim.document_id,
       status: mode === "dry_run" ? "released" : "failed",
       costUsd:
-        error instanceof ReaderLlmInvalidOutputError ? error.costUsd : 0,
+        error instanceof ReaderLlmInvalidOutputError ||
+        error instanceof ReaderZipNoReadableLeafError
+          ? error.costUsd
+          : 0,
       durationMs: Date.now() - startedAt,
       issue,
     };

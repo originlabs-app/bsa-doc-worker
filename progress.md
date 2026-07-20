@@ -307,3 +307,38 @@
   frais en tentative 2 interne) au lieu d'ADAPTER_FAILURE non-retryable.
 - Rapport complet : `reports/proof-sweep-20260721.md` (section FIX C).
 - Statut : ADAPTERS-FIX-C GELÉ (code aux commits `b6fd0d7` + `d91d4f3`).
+
+## 2026-07-21 — READER-HARDENING : PDF longs par tranches + isolation feuilles ZIP
+
+- Contexte : 2 défauts PROUVÉS par la démo chaîne réelle Maximilien 942952
+  (`reports/night-demos-20260721.md`, DÉMO 1) — CCAP 902 Ko et PGC 427 Ko en
+  `READER_LLM_INVALID_OUTPUT` 2×2 tentatives (~0,41 $ brûlés, sortie > cap
+  8 192 tokens), et `processZipDocument` qui propageait l'échec d'UNE feuille
+  au ZIP entier (AO sans analyse pour un PGC illisible).
+- FIX 1 (commit `038451d`) : `splitPdfIntoPageChunks` + lecture par tranches
+  de 8 pages dans `readPdf` (> 8 pages → tranches séquentielles, texte
+  concaténé, `pages_lues` sommées, coût tracé par tranche en notes
+  `chunk_read`, retry schéma-invalide borné PAR tranche) ; cap sortie LLM
+  8 192 → 16 384 pour les docs denses ≤ 8 pages restés single-shot. Choix
+  tranches (vs continuation) : le file-parser facture l'entrée par page, le
+  découpage envoie chaque page une seule fois → coût ≈ single-shot, linéaire
+  et prévisible ; la continuation renverrait tout le PDF à chaque tour et
+  `generateObject` n'a pas de continuation native sur JSON tronqué. Un doc
+  long ne peut plus brûler 2 tentatives pour un dépassement structurel.
+- FIX 2 (commit `46a32e9`) : isolation par feuille dans `processZipDocument` —
+  feuille qui jette = marquée dans les notes (entry + raison typée + coût
+  brûlé, spend enregistré), les autres complètent ; échec global UNIQUEMENT
+  si aucune feuille lisible (`READER_ZIP_NO_READABLE_LEAF`, coût agrégé +
+  notes par feuille dans `store.fail`) ; `complete()` reflète le partiel
+  honnêtement (statut + liste des feuilles échouées, coût total brûlé
+  compris). WeakSet anti-double-spend supprimé (mort après le refactor).
+- Tests 206 → 211 : découpage borné (8 pages entier / 9 pages en 8+1), doc
+  20 pages → 3 tranches concaténées 1 seule tentative logique coût par
+  tranche, tranche invalide bornée à son propre retry (0,018 $ agrégé), ZIP
+  4 feuilles dont 1 LLM-échouée + 1 corrompue → 2 lues + échecs marqués sans
+  échec global, ZIP 100 % échoué → échec global propre typé. Zéro régression.
+- Gates avant-plan : test:ci 211/211, lint, typecheck, build, `npm audit`
+  0 vulnérabilité, gitleaks 0 fuite (45 commits + dir src/tests).
+- Worktree dédié `../BSA_DCE_RECOVERY_WORKER-reader-hardening`, branche
+  `feat/reader-hardening` depuis main `8ffab18`. Pas de push (merge Pierre).
+- Statut : READER-HARDENING GELÉ (fixes aux commits `038451d` + `46a32e9`).

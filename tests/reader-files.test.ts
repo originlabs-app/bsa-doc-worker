@@ -12,6 +12,7 @@ import {
   extractZipLeaves,
   type ReaderArchiveError,
 } from "../src/reader/archive.js";
+import { splitPdfIntoPageChunks } from "../src/reader/pdf-subset.js";
 import { readLocalDocument } from "../src/reader/readers.js";
 
 const tempDirectories: string[] = [];
@@ -156,5 +157,95 @@ describe("local document fixtures", () => {
       name: "ReaderArchiveError",
       code: "ZIP_CORRUPT",
     } satisfies Partial<ReaderArchiveError>);
+  });
+});
+
+async function multiPagePdf(pages: number): Promise<Uint8Array> {
+  const pdf = await PDFDocument.create();
+  for (let index = 0; index < pages; index += 1) pdf.addPage([400, 400]);
+  return new Uint8Array(await pdf.save());
+}
+
+describe("long PDF chunked reading", () => {
+  it("keeps a short PDF whole and slices a long one into bounded page chunks", async () => {
+    const shortChunks = await splitPdfIntoPageChunks(await multiPagePdf(8), 8);
+    expect(shortChunks).toHaveLength(1);
+    expect(shortChunks[0]).toMatchObject({ pages: "1-8", pageCount: 8 });
+
+    const longChunks = await splitPdfIntoPageChunks(await multiPagePdf(9), 8);
+    expect(longChunks.map((chunk) => chunk.pages)).toEqual(["1-8", "9"]);
+    expect(longChunks.map((chunk) => chunk.pageCount)).toEqual([8, 1]);
+    await expect(
+      PDFDocument.load(longChunks[0]!.bytes).then((pdf) => pdf.getPageCount()),
+    ).resolves.toBe(8);
+  });
+
+  it("reads a long PDF slice by slice, concatenates the text and traces each slice cost", async () => {
+    const directory = await tempDirectory();
+    const path = join(directory, "CCAP.pdf");
+    await writeFile(path, await multiPagePdf(20));
+    const receivedPages: number[] = [];
+    const generate = vi.fn(async ({ bytes }: { bytes: Uint8Array }) => {
+      const pageCount = (await PDFDocument.load(bytes)).getPageCount();
+      receivedPages.push(pageCount);
+      return {
+        object: {
+          texte: `Tranche ${receivedPages.length}`,
+          pages_lues: pageCount,
+        },
+        costUsd: 0.01,
+      };
+    });
+    const llmClient: StructuredPdfClient = { generate };
+
+    const result = await readLocalDocument(
+      { path, fileName: "CCAP.pdf" },
+      { llmClient, knownRole: "ccap", maxModelBytes: 20 * 1024 * 1024 },
+    );
+
+    expect(generate).toHaveBeenCalledTimes(3);
+    expect(receivedPages).toEqual([8, 8, 4]);
+    expect(result).toMatchObject({
+      kind: "pdf",
+      status: "extracted_ocr",
+      text: "Tranche 1\n\nTranche 2\n\nTranche 3",
+      modelCostUsd: 0.03,
+      pagesRead: 20,
+      modelAttempts: 1,
+    });
+    expect(result.notes.filter((note) => note.status === "chunk_read")).toEqual([
+      expect.objectContaining({ pages: "1-8", costUsd: 0.01, attempts: 1 }),
+      expect.objectContaining({ pages: "9-16", costUsd: 0.01, attempts: 1 }),
+      expect.objectContaining({ pages: "17-20", costUsd: 0.01, attempts: 1 }),
+    ]);
+  });
+
+  it("bounds a structurally invalid slice to its own retry and bills every read slice", async () => {
+    const directory = await tempDirectory();
+    const path = join(directory, "PGC.pdf");
+    await writeFile(path, await multiPagePdf(9));
+    const generate = vi
+      .fn()
+      .mockResolvedValueOnce({
+        object: { texte: "Tranche 1", pages_lues: 8 },
+        costUsd: 0.01,
+      })
+      .mockResolvedValue({ object: { texte: 42 }, costUsd: 0.004 });
+
+    await expect(
+      readLocalDocument(
+        { path, fileName: "PGC.pdf" },
+        {
+          llmClient: { generate },
+          knownRole: null,
+          maxModelBytes: 20 * 1024 * 1024,
+        },
+      ),
+    ).rejects.toMatchObject({
+      name: "ReaderLlmInvalidOutputError",
+      code: "READER_LLM_INVALID_OUTPUT",
+      costUsd: 0.018,
+    });
+    expect(generate).toHaveBeenCalledTimes(3);
   });
 });

@@ -31,6 +31,48 @@ function formatPageRanges(pageIndexes: number[]): string {
   return ranges.join(",");
 }
 
+export interface PdfPageChunk {
+  bytes: Uint8Array;
+  pages: string;
+  pageCount: number;
+}
+
+export async function splitPdfIntoPageChunks(
+  bytes: Uint8Array,
+  pagesPerChunk: number,
+): Promise<PdfPageChunk[]> {
+  const source = await PDFDocument.load(bytes, { ignoreEncryption: true });
+  const pageCount = source.getPageCount();
+  if (pageCount <= pagesPerChunk) {
+    return [
+      {
+        bytes,
+        pages: formatPageRanges(
+          Array.from({ length: pageCount }, (_value, index) => index),
+        ),
+        pageCount,
+      },
+    ];
+  }
+  const chunks: PdfPageChunk[] = [];
+  for (let start = 0; start < pageCount; start += pagesPerChunk) {
+    const pageIndexes = Array.from(
+      { length: Math.min(pagesPerChunk, pageCount - start) },
+      (_value, index) => start + index,
+    );
+    const target = await PDFDocument.create();
+    for (const page of await target.copyPages(source, pageIndexes)) {
+      target.addPage(page);
+    }
+    chunks.push({
+      bytes: new Uint8Array(await target.save()),
+      pages: formatPageRanges(pageIndexes),
+      pageCount: pageIndexes.length,
+    });
+  }
+  return chunks;
+}
+
 export async function copyPdfHeadTailPages(
   bytes: Uint8Array,
   options: PdfSubsetOptions,

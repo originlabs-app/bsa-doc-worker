@@ -5,12 +5,19 @@ import WordExtractor from "word-extractor";
 import * as XLSX from "xlsx";
 
 import {
+  ReaderLlmInvalidOutputError,
+  ReaderLlmProviderError,
   readPdfWithLlm,
+  roundedCost,
   type StructuredPdfClient,
 } from "../llm/document-reader.js";
 import type { DocumentReaderRole } from "../llm/document-schemas.js";
 import { classifyAnalysisRole } from "./classification.js";
-import { copyPdfHeadTailPages } from "./pdf-subset.js";
+import {
+  copyPdfHeadTailPages,
+  splitPdfIntoPageChunks,
+  type PdfPageChunk,
+} from "./pdf-subset.js";
 import type {
   AnalysisRole,
   DocumentKind,
@@ -19,6 +26,7 @@ import type {
 } from "./types.js";
 
 const PDF_SUBSET = { firstPages: 30, tailPages: 10 };
+const PDF_CHUNK_PAGES = 8;
 const MAX_DOCX_PART_BYTES = 50 * 1024 * 1024;
 const MAX_DOCX_INFLATED_BYTES = 120 * 1024 * 1024;
 
@@ -276,6 +284,85 @@ function readSpreadsheet(
   };
 }
 
+async function readPdfInChunks(input: {
+  document: LocalDocument;
+  sourceBytes: Uint8Array;
+  sentBytes: Uint8Array;
+  chunks: PdfPageChunk[];
+  role: DocumentReaderRole;
+  options: LocalDocumentReaderOptions;
+  pageCount?: number;
+  pages?: string;
+}): Promise<LocalDocumentReadResult> {
+  const parts: string[] = [];
+  const chunkNotes: ExtractionNote[] = [];
+  let totalCost = 0;
+  let pagesRead = 0;
+  let attempts = 1;
+  for (const chunk of input.chunks) {
+    let slice;
+    try {
+      slice = await readPdfWithLlm(
+        {
+          bytes: chunk.bytes,
+          fileName: input.document.fileName,
+          role: input.role,
+        },
+        input.options.llmClient,
+      );
+    } catch (error) {
+      if (error instanceof ReaderLlmInvalidOutputError) {
+        throw new ReaderLlmInvalidOutputError(
+          roundedCost(totalCost + error.costUsd),
+          { cause: error },
+        );
+      }
+      if (error instanceof ReaderLlmProviderError) {
+        throw new ReaderLlmProviderError(
+          roundedCost(totalCost + error.costUsd),
+          { cause: error },
+        );
+      }
+      throw error;
+    }
+    totalCost = roundedCost(totalCost + slice.costUsd);
+    pagesRead += slice.pagesRead;
+    attempts = Math.max(attempts, slice.attempts);
+    if (slice.text) parts.push(slice.text);
+    chunkNotes.push({
+      entry: input.document.fileName,
+      kind: "pdf",
+      status: "chunk_read",
+      pages: chunk.pages,
+      pageCount: chunk.pageCount,
+      costUsd: slice.costUsd,
+      attempts: slice.attempts,
+    });
+  }
+  const text = parts.join("\n\n").trim();
+  return {
+    kind: "pdf",
+    status: text ? "extracted_ocr" : "empty_text",
+    text,
+    modelCostUsd: totalCost,
+    pagesRead,
+    modelAttempts: attempts,
+    notes: [
+      {
+        entry: input.document.fileName,
+        kind: "pdf",
+        status: text ? "extracted_ocr" : "empty_text",
+        bytes: input.sentBytes.byteLength,
+        sourceBytes: input.sourceBytes.byteLength,
+        sentBytes: input.sentBytes.byteLength,
+        ...(input.pageCount === undefined ? {} : { pageCount: input.pageCount }),
+        ...(input.pages === undefined ? {} : { pages: input.pages }),
+      },
+      ...chunkNotes,
+    ],
+  };
+}
+
 async function readPdf(
   document: LocalDocument,
   bytes: Uint8Array,
@@ -331,6 +418,25 @@ async function readPdf(
   }
   const role: DocumentReaderRole =
     options.knownRole ?? classifyAnalysisRole(document.fileName) ?? "inconnu";
+  let chunks: PdfPageChunk[] | null = null;
+  try {
+    const split = await splitPdfIntoPageChunks(sentBytes, PDF_CHUNK_PAGES);
+    if (split.length > 1) chunks = split;
+  } catch {
+    chunks = null;
+  }
+  if (chunks) {
+    return readPdfInChunks({
+      document,
+      sourceBytes: bytes,
+      sentBytes,
+      chunks,
+      role,
+      options,
+      ...(pageCount === undefined ? {} : { pageCount }),
+      ...(pages === undefined ? {} : { pages }),
+    });
+  }
   const result = await readPdfWithLlm(
     { bytes: sentBytes, fileName: document.fileName, role },
     options.llmClient,

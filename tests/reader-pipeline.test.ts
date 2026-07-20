@@ -358,6 +358,116 @@ describe("runReaderTick", () => {
     );
   });
 
+  it("isolates a failing ZIP sheet, completes the readable rest and marks the failure", async () => {
+    const directory = await tempDirectory();
+    const path = join(directory, "DCE.zip");
+    await writeFile(
+      path,
+      zipSync({
+        "pieces/RC.pdf": await pdfBytes(),
+        "prix/BPU.csv": strToU8("designation;prix\nprestation;10"),
+        "pieces/PGC.pdf": await pdfBytes(),
+        "scans/illisible.pdf": strToU8("corrompu"),
+      }),
+    );
+    const store = fakeStore([
+      claim({ file_name: "DCE.zip", url: "company-1/tender-1/DCE.zip", analysis_role: null }),
+    ]);
+    const generate = vi.fn(async ({ fileName }: { fileName: string }) =>
+      fileName.includes("PGC")
+        ? { object: { texte: 42 }, costUsd: 0.003 }
+        : { object: { texte: "Règlement lu", pages_lues: 1 }, costUsd: 0.02 },
+    );
+
+    const result = await runReaderTick(config("apply", { batch: 1 }), {
+      store,
+      source: source(path),
+      llmClient: { generate },
+      workerId: "reader:test",
+    });
+
+    expect(result).toMatchObject({ processed: 1, failed: 0 });
+    expect(result.results[0]).toMatchObject({
+      status: "extracted",
+      costUsd: expect.closeTo(0.026, 9) as number,
+    });
+    expect(store.fail).not.toHaveBeenCalled();
+    expect(store.complete).toHaveBeenCalledWith(
+      expect.objectContaining({
+        extractionStatus: "extracted",
+        costUsd: expect.closeTo(0.026, 9) as number,
+        notes: expect.arrayContaining([
+          expect.objectContaining({
+            entry: "pieces/PGC.pdf",
+            kind: "pdf",
+            status: "failed",
+            reason: "READER_LLM_INVALID_OUTPUT",
+            costUsd: 0.006,
+          }),
+          expect.objectContaining({
+            entry: "scans/illisible.pdf",
+            status: "unsupported_format",
+          }),
+        ]),
+      }),
+    );
+    expect(
+      vi.mocked(store.upsertZipChild).mock.calls.map(([input]) => input.entryPath),
+    ).toEqual(["pieces/RC.pdf", "prix/BPU.csv", "scans/illisible.pdf"]);
+    expect(store.recordSpend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        costUsd: 0.006,
+        metadata: expect.objectContaining({ entry_path: "pieces/PGC.pdf" }),
+      }),
+    );
+  });
+
+  it("fails a ZIP globally only when no sheet at all is readable", async () => {
+    const directory = await tempDirectory();
+    const path = join(directory, "DCE.zip");
+    await writeFile(
+      path,
+      zipSync({
+        "pieces/CCAP.pdf": await pdfBytes(),
+        "pieces/PGC.pdf": await pdfBytes(),
+      }),
+    );
+    const store = fakeStore([claim({ file_name: "DCE.zip", analysis_role: null })]);
+
+    const result = await runReaderTick(config("apply", { batch: 1 }), {
+      store,
+      source: source(path),
+      llmClient: invalidLlm(),
+      workerId: "reader:test",
+    });
+
+    expect(result).toMatchObject({ processed: 0, failed: 1 });
+    expect(result.results[0]).toMatchObject({
+      status: "failed",
+      issue: "READER_ZIP_NO_READABLE_LEAF",
+      costUsd: expect.closeTo(0.012, 9) as number,
+    });
+    expect(store.fail).toHaveBeenCalledWith(
+      "queue-1",
+      "reader:test",
+      "READER_ZIP_NO_READABLE_LEAF",
+      expect.arrayContaining([
+        expect.objectContaining({
+          entry: "pieces/CCAP.pdf",
+          status: "failed",
+          reason: "READER_LLM_INVALID_OUTPUT",
+        }),
+        expect.objectContaining({
+          entry: "pieces/PGC.pdf",
+          status: "failed",
+          reason: "READER_LLM_INVALID_OUTPUT",
+        }),
+      ]),
+    );
+    expect(store.complete).not.toHaveBeenCalled();
+    expect(store.recordSpend).toHaveBeenCalledTimes(2);
+  });
+
   it("fails a corrupt ZIP cleanly without stopping the tick", async () => {
     const directory = await tempDirectory();
     const path = join(directory, "aussillon.zip");
