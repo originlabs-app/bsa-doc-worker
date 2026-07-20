@@ -6,6 +6,12 @@ import type { BuyerProfileAdapter } from "./ports.js";
 import { routePortal } from "./router.js";
 
 const MAX_ATTEMPTS_PER_TENDER = 2;
+const RECOVERY_BLOCKING_REASONS = new Set([
+  "AW_AUTHENTICATION_REJECTED",
+  "CAPTCHA_UNSOLVED",
+  "PROFILE_LINK_NOT_FINAL",
+  "RETRY_CAP_REACHED",
+]);
 
 export interface RecoveryDependencies {
   awAdapter: BuyerProfileAdapter;
@@ -121,13 +127,16 @@ export async function runRecovery(
       if (adapterError.retryable && attempt < MAX_ATTEMPTS_PER_TENDER) {
         continue;
       }
+      const reasonCode =
+        adapterError.retryable && attempt === MAX_ATTEMPTS_PER_TENDER
+          ? "RETRY_CAP_REACHED"
+          : adapterError.reasonCode;
       return finish({
         ...baseReport(request, config, route.platform, attempt),
-        status: "failed",
-        reasonCode:
-          adapterError.retryable && attempt === MAX_ATTEMPTS_PER_TENDER
-            ? "RETRY_CAP_REACHED"
-            : adapterError.reasonCode,
+        status: RECOVERY_BLOCKING_REASONS.has(reasonCode)
+          ? "recovery_blocked"
+          : "failed",
+        reasonCode,
       });
     }
   }

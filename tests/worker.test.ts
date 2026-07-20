@@ -141,9 +141,29 @@ describe("runRecovery", () => {
       { awAdapter: { discover } },
     );
 
-    expect(report.status).toBe("failed");
+    expect(report.status).toBe("recovery_blocked");
     expect(report.reasonCode).toBe("RETRY_CAP_REACHED");
     expect(report.attemptsUsed).toBe(2);
     expect(discover).toHaveBeenCalledTimes(2);
+  });
+
+  it("blocks a rejected AW login after one attempt", async () => {
+    const discover = vi.fn(async () => {
+      throw new AwAdapterError(
+        "AW_AUTHENTICATION_REJECTED",
+        false,
+        "fixture failure",
+      );
+    });
+    const report = await runRecovery(
+      requestFor("https://www.marches-publics.info/consultation?IDM=1"),
+      loadWorkerConfig({ RECOVERY_MODE: "dry_run" }),
+      { awAdapter: { discover } },
+    );
+
+    expect(report.status).toBe("recovery_blocked");
+    expect(report.reasonCode).toBe("AW_AUTHENTICATION_REJECTED");
+    expect(report.attemptsUsed).toBe(1);
+    expect(discover).toHaveBeenCalledTimes(1);
   });
 });

@@ -41,6 +41,42 @@ describe("runCli", () => {
     expect(memory.stderr()).not.toContain("signature");
   });
 
+  it("loads an explicit local worker env file without exposing its values", async () => {
+    const input = await readFile(
+      new URL("fixtures/jobs.jsonl", import.meta.url),
+      "utf8",
+    );
+    let stdout = "";
+    let stderr = "";
+    const io: CliIo = {
+      readInput: async (path) =>
+        path === "local.env"
+          ? "AW_PORTAL_PASSWORD=fixture#part\n"
+          : input,
+      stdout: { write: (chunk) => (stdout += String(chunk)) },
+      stderr: { write: (chunk) => (stderr += String(chunk)) },
+    };
+
+    const exitCode = await runCli(
+      [
+        "--mode",
+        "dry_run",
+        "--provider",
+        "mock",
+        "--env-file",
+        "local.env",
+        "--input",
+        "fixture",
+      ],
+      {},
+      io,
+    );
+
+    expect(exitCode).toBe(0);
+    expect(stdout).not.toContain("fixture#part");
+    expect(stderr).not.toContain("fixture#part");
+  });
+
   it("reports invalid input without echoing the hostile URL", async () => {
     const hostileUrl = "http://bad.test/path?token=must-not-leak";
     const memory = memoryIo(

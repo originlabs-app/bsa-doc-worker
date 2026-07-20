@@ -5,8 +5,8 @@ profile links supplied by Nukema. The MVP lets the team develop and verify the
 AW Solutions path from sanitized fixtures without secrets, deployment or BSA
 production writes.
 
-Status: local MVP only. A strict real dry-run was completed on 2026-07-20; see
-`reports/recette-reelle-dry-run-20260720.md`. No GitHub repository, Railway
+Status: local MVP only. The corrected authenticated dry-run is recorded in
+`reports/recette-reelle-dry-run-20260720-login-fix.md`. No GitHub repository, Railway
 service, object-storage sink or BSA import is configured.
 
 ## Architecture
@@ -114,13 +114,29 @@ These values belong only in the worker secret manager or an ignored local
 `.env`; never commit or paste their values into logs:
 
 ```dotenv
-BROWSERLESS_TOKEN=
-AW_PORTAL_EMAIL=
-AW_PORTAL_PASSWORD=
+BROWSERLESS_TOKEN=""
+AW_PORTAL_EMAIL=""
+AW_PORTAL_PASSWORD=""
 ```
 
-The repository intentionally does not auto-load `.env`. Export the variables
-through the execution environment. The 2026-07-20 recipe contacted only the
+The repository intentionally does not auto-load `.env`. Use the explicit
+worker loader for local execution so characters such as `#` remain part of a
+secret instead of becoming a dotenv comment:
+
+```sh
+npm run worker -- \
+  --env-file .env \
+  --mode dry_run \
+  --provider real \
+  --input jobs.jsonl
+```
+
+In a secret manager, inject the three variables directly. The AW login waits
+for APR's asynchronous Keycloak redirect, fills the real `username` and
+`password` controls, submits the original form so its hidden state is kept,
+and does not reselect `BSA PARTNERS` when it is already the current entity.
+
+The 2026-07-20 recipe contacted only the
 two authorized public indexes and Browserless/AW authentication surfaces; it
 performed no persistent download or BSA write.
 

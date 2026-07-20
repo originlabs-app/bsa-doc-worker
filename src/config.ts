@@ -13,6 +13,32 @@ const REAL_SECRET_NAMES = [
 
 export type RealSecretName = (typeof REAL_SECRET_NAMES)[number];
 
+export function parseWorkerSecretEnv(
+  source: string,
+): Partial<Record<RealSecretName, string>> {
+  const parsed: Partial<Record<RealSecretName, string>> = {};
+  for (const line of source.split(/\r?\n/)) {
+    for (const name of REAL_SECRET_NAMES) {
+      const prefix = `${name}=`;
+      if (!line.startsWith(prefix)) continue;
+      if (parsed[name] !== undefined) {
+        throw new Error("DUPLICATE_WORKER_SECRET");
+      }
+      const rawValue = line.slice(prefix.length).trim();
+      const quote = rawValue[0];
+      if (quote === '"' || quote === "'") {
+        if (!rawValue.endsWith(quote) || rawValue.length < 2) {
+          throw new Error("INVALID_WORKER_SECRET_ENV");
+        }
+        parsed[name] = rawValue.slice(1, -1);
+      } else {
+        parsed[name] = rawValue;
+      }
+    }
+  }
+  return parsed;
+}
+
 export interface WorkerConfig {
   mode: RecoveryMode;
   provider: RecoveryProvider;

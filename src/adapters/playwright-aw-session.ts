@@ -59,6 +59,22 @@ async function waitForCaptchaIfPresent(
   }
 }
 
+async function waitForAwEntrySurface(
+  page: Page,
+  timeoutMs: number,
+): Promise<void> {
+  const candidates = [
+    page.locator('#username, input[name="username"]').first(),
+    page.getByText(/RETRAIT ANONYME/i).first(),
+    page.locator("#texteCaptcha, #selectAll").first(),
+  ];
+  await Promise.any(
+    candidates.map((candidate) =>
+      candidate.waitFor({ state: "visible", timeout: timeoutMs }),
+    ),
+  ).catch(() => undefined);
+}
+
 async function waitForOptionalNavigation(
   page: Page,
   action: () => Promise<void>,
@@ -70,6 +86,91 @@ async function waitForOptionalNavigation(
       .catch(() => null),
     action(),
   ]);
+}
+
+interface AwCredentials {
+  email: string;
+  password: string;
+}
+
+async function selectBsaPartnersEntityIfPrompted(
+  page: Page,
+  timeoutMs: number,
+): Promise<void> {
+  const entityLabel = page.getByText(/^BSA PARTNERS$/i).first();
+  if (!(await entityLabel.isVisible().catch(() => false))) return;
+
+  const entityControl = entityLabel
+    .locator(
+      "xpath=ancestor-or-self::a[1] | ancestor-or-self::button[1] | ancestor-or-self::*[@role='button'][1]",
+    )
+    .first();
+  if ((await entityControl.count()) === 0) return;
+  const ariaLabel = await entityControl.getAttribute("aria-label");
+  if (/compte de l'utilisateur actuel/i.test(ariaLabel ?? "")) return;
+  await waitForOptionalNavigation(
+    page,
+    () => entityControl.click(),
+    timeoutMs,
+  );
+}
+
+export async function authenticateAwIfPrompted(
+  page: Page,
+  credentials: AwCredentials,
+  timeoutMs: number,
+): Promise<void> {
+  const username = page
+    .locator(
+      '#username, input[name="username"], input[type="email"], input[name*="mail" i]',
+    )
+    .first();
+  const password = page.locator('input[type="password"]').first();
+  if (!(await username.isVisible().catch(() => false))) {
+    await username
+      .waitFor({ state: "visible", timeout: timeoutMs })
+      .catch(() => undefined);
+  }
+  if (!(await password.isVisible().catch(() => false))) {
+    await password
+      .waitFor({ state: "visible", timeout: timeoutMs })
+      .catch(() => undefined);
+  }
+  if (
+    !(await username.isVisible().catch(() => false)) ||
+    !(await password.isVisible().catch(() => false))
+  ) {
+    throw new AwAdapterError(
+      "PROFILE_LINK_NOT_FINAL",
+      false,
+      "AW anonymous withdrawal and login form are unavailable",
+    );
+  }
+  await username.fill(credentials.email);
+  await password.fill(credentials.password);
+  const submit = page
+    .locator('#kc-login, button[type="submit"], input[type="submit"]')
+    .first();
+  if ((await submit.count()) === 0) {
+    throw new AwAdapterError(
+      "ADAPTER_FAILURE",
+      false,
+      "AW login submit control is unavailable",
+    );
+  }
+  await waitForOptionalNavigation(page, () => submit.click(), timeoutMs);
+
+  const authenticationError = page
+    .locator("#input-error, .kc-feedback-text")
+    .first();
+  if (await authenticationError.isVisible().catch(() => false)) {
+    throw new AwAdapterError(
+      "AW_AUTHENTICATION_REJECTED",
+      false,
+      "AW authentication was rejected",
+    );
+  }
+  await selectBsaPartnersEntityIfPrompted(page, timeoutMs);
 }
 
 export class PlaywrightAwBrowserSession implements AwBrowserSession {
@@ -92,6 +193,7 @@ export class PlaywrightAwBrowserSession implements AwBrowserSession {
         waitUntil: "domcontentloaded",
         timeout: this.timeoutMs,
       });
+      await waitForAwEntrySurface(page, this.timeoutMs);
       await waitForCaptchaIfPresent(page, this.timeoutMs);
 
       const anonymousButton = page.getByText(/RETRAIT ANONYME/i).first();
@@ -102,7 +204,15 @@ export class PlaywrightAwBrowserSession implements AwBrowserSession {
           this.timeoutMs,
         );
       } else {
-        await this.authenticateIfPrompted(page);
+        await authenticateAwIfPrompted(
+          page,
+          {
+            email: this.options.awPortalEmail,
+            password: this.options.awPortalPassword,
+          },
+          this.timeoutMs,
+        );
+        await waitForCaptchaIfPresent(page, this.timeoutMs);
       }
 
       await this.selectLots(page, request);
@@ -151,39 +261,6 @@ export class PlaywrightAwBrowserSession implements AwBrowserSession {
     } finally {
       await browser?.close().catch(() => undefined);
     }
-  }
-
-  private async authenticateIfPrompted(page: Page): Promise<void> {
-    const email = page
-      .locator('input[type="email"], input[name*="mail" i]')
-      .first();
-    const password = page.locator('input[type="password"]').first();
-    if (
-      !(await email.isVisible().catch(() => false)) ||
-      !(await password.isVisible().catch(() => false))
-    ) {
-      throw new AwAdapterError(
-        "PROFILE_LINK_NOT_FINAL",
-        false,
-        "AW anonymous withdrawal and login form are unavailable",
-      );
-    }
-    await email.fill(this.options.awPortalEmail);
-    await password.fill(this.options.awPortalPassword);
-    const submit = page.locator('button[type="submit"], input[type="submit"]').first();
-    if ((await submit.count()) === 0) {
-      throw new AwAdapterError(
-        "ADAPTER_FAILURE",
-        false,
-        "AW login submit control is unavailable",
-      );
-    }
-    await waitForOptionalNavigation(
-      page,
-      () => submit.click(),
-      this.timeoutMs,
-    );
-    await waitForCaptchaIfPresent(page, this.timeoutMs);
   }
 
   private async selectLots(page: Page, request: RecoveryRequest): Promise<void> {

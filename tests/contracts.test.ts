@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { loadWorkerConfig } from "../src/config.js";
+import { loadWorkerConfig, parseWorkerSecretEnv } from "../src/config.js";
 import { RecoveryRequestSchema } from "../src/contracts.js";
 
 describe("RecoveryRequestSchema", () => {
@@ -48,5 +48,26 @@ describe("loadWorkerConfig", () => {
       "AW_PORTAL_EMAIL",
       "AW_PORTAL_PASSWORD",
     ]);
+  });
+});
+
+describe("parseWorkerSecretEnv", () => {
+  it("keeps comment markers inside an unquoted worker secret", () => {
+    const parsed = parseWorkerSecretEnv(
+      "AW_PORTAL_EMAIL=operator@example.test\nAW_PORTAL_PASSWORD=fixture#part\n",
+    );
+
+    expect(parsed).toEqual({
+      AW_PORTAL_EMAIL: "operator@example.test",
+      AW_PORTAL_PASSWORD: "fixture#part",
+    });
+  });
+
+  it("rejects duplicate worker secrets", () => {
+    expect(() =>
+      parseWorkerSecretEnv(
+        "AW_PORTAL_PASSWORD=first\nAW_PORTAL_PASSWORD=second\n",
+      ),
+    ).toThrow("DUPLICATE_WORKER_SECRET");
   });
 });

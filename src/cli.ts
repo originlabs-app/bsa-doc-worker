@@ -7,7 +7,11 @@ import {
 } from "./adapters/aw-solutions.js";
 import { MockAwBrowserSession } from "./adapters/mock-aw-session.js";
 import { PlaywrightAwBrowserSession } from "./adapters/playwright-aw-session.js";
-import { loadWorkerConfig, type WorkerConfig } from "./config.js";
+import {
+  loadWorkerConfig,
+  parseWorkerSecretEnv,
+  type WorkerConfig,
+} from "./config.js";
 import { RecoveryRequestSchema } from "./contracts.js";
 import { JsonLineLogger, type TextOutput } from "./logger.js";
 import type { BuyerProfileAdapter } from "./ports.js";
@@ -21,6 +25,7 @@ export interface CliIo {
 
 interface CliArgs {
   input: string;
+  envFile?: string;
   mode?: string;
   provider?: string;
 }
@@ -40,6 +45,7 @@ function parseArgs(argv: string[]): CliArgs {
       throw new Error("invalid arguments");
     }
     if (flag === "--input") parsed.input = value;
+    else if (flag === "--env-file") parsed.envFile = value;
     else if (flag === "--mode") parsed.mode = value;
     else if (flag === "--provider") parsed.provider = value;
     else throw new Error("unknown argument");
@@ -86,8 +92,12 @@ export async function runCli(
 ): Promise<number> {
   try {
     const args = parseArgs(argv);
+    const localSecrets = args.envFile
+      ? parseWorkerSecretEnv(await io.readInput(args.envFile))
+      : {};
     const config = loadWorkerConfig({
       ...env,
+      ...localSecrets,
       ...(args.mode === undefined ? {} : { RECOVERY_MODE: args.mode }),
       ...(args.provider === undefined
         ? {}
