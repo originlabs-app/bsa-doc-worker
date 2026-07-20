@@ -10,6 +10,22 @@ export class ReaderDownloadError extends Error {
   }
 }
 
+async function writeComplete(
+  handle: Awaited<ReturnType<typeof open>>,
+  chunk: Uint8Array,
+): Promise<void> {
+  let offset = 0;
+  while (offset < chunk.byteLength) {
+    const { bytesWritten } = await handle.write(
+      chunk,
+      offset,
+      chunk.byteLength - offset,
+    );
+    if (bytesWritten === 0) throw new ReaderDownloadError("DOCUMENT_WRITE_STALLED");
+    offset += bytesWritten;
+  }
+}
+
 export async function streamResponseToFile(
   response: Response,
   targetPath: string,
@@ -36,7 +52,7 @@ export async function streamResponseToFile(
         await reader.cancel().catch(() => undefined);
         throw new ReaderDownloadError("DOCUMENT_TOO_LARGE");
       }
-      await handle.write(value);
+      await writeComplete(handle, value);
       await onProgress?.(total);
     }
     return total;
