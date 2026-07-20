@@ -199,3 +199,32 @@
 - Corpus réel futur (recette orchestrateur) : AW IDM 1848852 / 1849180 /
   1848459 / 1840818 / 1846761 et Maximilien 942952.
 - Statut : ADAPTERS-FIX GELÉ, prêt pour recette réelle orchestrateur.
+
+## 2026-07-20 (nuit) — FIX C mur AW choixDCE (lien anonyme) + re-preuve réelle
+
+- FIX C (commit `b6fd0d7`) : sur `dematEnt.choixDCE`, si le bouton RETRAIT
+  ANONYME est absent, suivre le lien « retirer le DCE en mode anonyme »
+  (`a[href*="fuseaction=dce.avertissement" i]`) AVANT toute dépense captcha
+  (le mur porte son propre `#texteCaptcha` d'identification qu'on abandonne) ;
+  la page d'arrivée expose la surface déjà gérée (RETRAIT ANONYME +
+  `#texteCaptcha` + verifLotsDCE). Bouton direct et identification Keycloak
+  gardés en fallback. + commit `d91d4f3` : event stderr
+  `adapter_attempt_failed` avec errorDetail statique (le run 1 réel était
+  indiagnosticable au seul reasonCode) ; contrat stdout inchangé.
+- Tests 158 → 163 (helper ×2, flux discover complet ×2 avec assertion
+  « solve financé sur avertissement, jamais sur choixDCE », worker ×1).
+  Gates avant-plan vertes aux 2 commits : test:ci, lint, typecheck, build.
+- Re-preuve réelle AW Saint-Gilles IDM 1848459 (dry_run strict, cap 40 u,
+  2 tentatives) : mur choixDCE FRANCHI (plus de PROFILE_LINK_NOT_FINAL,
+  52,9 s puis 52,7 s au lieu de 143 s), mais MANIFESTE NON OBTENU —
+  `ADAPTER_FAILURE / "AW select-all control is unavailable"` ×2. Diagnostic
+  prouvé par sonde HTTP gratuite : POST captcha faux → 302
+  `dce.avertissement&typeErreur=captcha` (rebond silencieux, 0 `#selectAll`)
+  = signature exacte ; Browserless a rempli le captcha image custom FAUX aux
+  2 tentatives (l'aléa connu, solves facturés). 22 unités (195 → 217, stable),
+  0 téléchargement, 0 écriture BSA (`productionWriteOccurred=false` ×2).
+- Candidat FIX D (non implémenté) : détecter `typeErreur=captcha` après le
+  clic RETRAIT ANONYME → `CAPTCHA_UNSOLVED` retryable (refinance un captcha
+  frais en tentative 2 interne) au lieu d'ADAPTER_FAILURE non-retryable.
+- Rapport complet : `reports/proof-sweep-20260721.md` (section FIX C).
+- Statut : ADAPTERS-FIX-C GELÉ (code aux commits `b6fd0d7` + `d91d4f3`).
