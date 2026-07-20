@@ -1,4 +1,9 @@
-import { chromium, type Browser, type Page } from "playwright-core";
+import {
+  chromium,
+  type Browser,
+  type Locator,
+  type Page,
+} from "playwright-core";
 
 import type { RecoveryRequest } from "../contracts.js";
 import {
@@ -173,6 +178,13 @@ export async function authenticateAwIfPrompted(
   await selectBsaPartnersEntityIfPrompted(page, timeoutMs);
 }
 
+export function locateAwLotSelectionForm(page: Page): Locator {
+  return page
+    .locator("form")
+    .filter({ has: page.locator("#selectAll") })
+    .first();
+}
+
 export class PlaywrightAwBrowserSession implements AwBrowserSession {
   private readonly timeoutMs: number;
 
@@ -216,10 +228,7 @@ export class PlaywrightAwBrowserSession implements AwBrowserSession {
       }
 
       await this.selectLots(page, request);
-      const form = page
-        .locator("form")
-        .filter({ has: page.locator("#selectAll") })
-        .first();
+      const form = locateAwLotSelectionForm(page);
       if ((await form.count()) === 0) {
         throw new AwAdapterError(
           "ADAPTER_FAILURE",

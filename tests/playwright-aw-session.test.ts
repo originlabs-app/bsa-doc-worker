@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { AwAdapterError } from "../src/adapters/aw-solutions.js";
-import { authenticateAwIfPrompted } from "../src/adapters/playwright-aw-session.js";
+import {
+  authenticateAwIfPrompted,
+  locateAwLotSelectionForm,
+} from "../src/adapters/playwright-aw-session.js";
 
 interface LocatorState {
   ariaLabel?: string;
@@ -171,5 +174,24 @@ describe("authenticateAwIfPrompted", () => {
       reasonCode: "AW_AUTHENTICATION_REJECTED",
       retryable: false,
     } satisfies Partial<AwAdapterError>);
+  });
+});
+
+describe("locateAwLotSelectionForm", () => {
+  it("selects the form containing the AW lot control without nesting forms", () => {
+    const selected = { first: () => "lot-form" };
+    const filter = (options: unknown) => {
+      expect(options).toEqual({ has: "select-all" });
+      return selected;
+    };
+    const page = {
+      locator: (selector: string) => {
+        if (selector === "#selectAll") return "select-all";
+        expect(selector).toBe("form");
+        return { filter };
+      },
+    };
+
+    expect(locateAwLotSelectionForm(page as never)).toBe("lot-form");
   });
 });
