@@ -1,3 +1,5 @@
+import type { Writable } from "node:stream";
+
 import type {
   RecoveryRequest,
   SafeManifest,
@@ -18,8 +20,21 @@ export interface BuyerProfileAdapter {
   discover(request: RecoveryRequest): Promise<AdapterDiscovery>;
 }
 
+export interface DownloadReceipt {
+  stableId: string;
+  bytes: number;
+  sha256: string;
+}
+
+export interface QuarantineWrite {
+  writable: Writable;
+  validate(): Promise<void>;
+  commit(receipt: DownloadReceipt): Promise<void>;
+  abort(): Promise<void>;
+}
+
 export interface DocumentIngestionSink {
-  open(attachment: SafeManifestAttachment): Promise<NodeJS.WritableStream>;
+  open(attachment: SafeManifestAttachment): Promise<QuarantineWrite>;
 }
 
 export interface ConsultationResolver {
