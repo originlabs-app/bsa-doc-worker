@@ -27,10 +27,13 @@ export interface WorkerLogger {
   info(event: string, record: LogRecord): void;
 }
 
+export interface TextOutput {
+  write(chunk: string): unknown;
+}
+
 export class JsonLineLogger implements WorkerLogger {
   constructor(
-    private readonly output: Pick<NodeJS.WritableStream, "write"> =
-      process.stderr,
+    private readonly output: TextOutput = process.stderr,
   ) {}
 
   info(event: string, record: LogRecord): void {
