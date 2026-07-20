@@ -191,8 +191,8 @@ export async function runAnalyzeService(input: {
     },
   };
 
-  if (input.config.mode === "dry_run") {
-    input.logger?.info("analyze_dry_run_result", {
+  if (input.config.mode === "shadow") {
+    input.logger?.info("analyze_shadow_result", {
       tender_id: input.dossier.tender.id,
       score: result.score,
       forced_zero: result.forcedZero,
@@ -202,7 +202,7 @@ export async function runAnalyzeService(input: {
       ...result.learning,
       ...result.execution,
     });
-    return { mode: "dry_run", status: "analyzed", result };
+    return { mode: "shadow", status: "analyzed", result };
   }
 
   await input.sink!.write(buildAnalysisWritePayload({

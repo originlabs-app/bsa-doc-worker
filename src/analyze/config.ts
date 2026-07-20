@@ -5,7 +5,7 @@ import {
   MAX_ANALYZE_STEPS,
 } from "./agent.js";
 
-export const AnalyzeModeSchema = z.enum(["off", "dry_run", "apply"]);
+export const AnalyzeModeSchema = z.enum(["off", "shadow", "apply"]);
 export type AnalyzeMode = z.infer<typeof AnalyzeModeSchema>;
 
 export interface AnalyzeConfig {

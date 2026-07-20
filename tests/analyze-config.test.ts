@@ -14,7 +14,7 @@ describe("loadAnalyzeConfig", () => {
   });
 
   it("requires OpenRouter only when analysis is enabled", () => {
-    expect(() => loadAnalyzeConfig({ ANALYZE_MODE: "dry_run" })).toThrow(
+    expect(() => loadAnalyzeConfig({ ANALYZE_MODE: "shadow" })).toThrow(
       "OPENROUTER_API_KEY is required",
     );
   });
@@ -22,14 +22,14 @@ describe("loadAnalyzeConfig", () => {
   it("rejects an operator override above the hard budgets", () => {
     expect(() =>
       loadAnalyzeConfig({
-        ANALYZE_MODE: "dry_run",
+        ANALYZE_MODE: "shadow",
         OPENROUTER_API_KEY: "test",
         ANALYZE_MAX_STEPS: "13",
       })
     ).toThrow("ANALYZE_MAX_STEPS");
     expect(() =>
       loadAnalyzeConfig({
-        ANALYZE_MODE: "dry_run",
+        ANALYZE_MODE: "shadow",
         OPENROUTER_API_KEY: "test",
         ANALYZE_MAX_OUTPUT_TOKENS: "8193",
       })
