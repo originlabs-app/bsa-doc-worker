@@ -1,5 +1,9 @@
 # Recette réelle DCE — dry_run — 2026-07-20
 
+> Superseded for AW login diagnostics and final cost by
+> `recette-reelle-dry-run-20260720-login-fix.md`. The public portal outcomes
+> below remain valid.
+
 ## Verdict
 
 - Récupérables : **0/3**.
