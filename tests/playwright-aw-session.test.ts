@@ -1,3 +1,4 @@
+import { chromium } from "playwright-core";
 import { describe, expect, it, vi } from "vitest";
 
 import type { AwAdapterError } from "../src/adapters/aw-solutions.js";
@@ -5,12 +6,19 @@ import {
   AW_CAPTCHA_SOLVE_UNIT_BUDGET_PER_ATTEMPT,
   AW_CAPTCHA_SOLVE_UNIT_COST,
   AwCaptchaSolveBudget,
+  PlaywrightAwBrowserSession,
   authenticateAwIfPrompted,
   chooseDceCompletIfPrompted,
   clickChoixDceIdentificationIfPrompted,
+  followAnonymousWithdrawalLinkIfPresented,
   locateAwLotSelectionForm,
   waitForCaptchaIfPresent,
 } from "../src/adapters/playwright-aw-session.js";
+import type { RecoveryRequest } from "../src/contracts.js";
+
+vi.mock("playwright-core", () => ({
+  chromium: { connectOverCDP: vi.fn() },
+}));
 
 interface LocatorState {
   ariaLabel?: string;
@@ -210,6 +218,7 @@ interface TextControlState {
 function fakeChoixDcePage(options: {
   textTargets?: Record<string, TextControlState>;
   captcha?: { present: boolean; value?: string; solves?: boolean };
+  anonymousLink?: { visible: boolean };
 }) {
   const clicked: string[] = [];
   const waitForFunction = vi.fn(async () => {
@@ -221,6 +230,12 @@ function fakeChoixDcePage(options: {
         count: async () =>
           selector === "#texteCaptcha" && options.captcha?.present ? 1 : 0,
         inputValue: async () => options.captcha?.value ?? "",
+        isVisible: async () =>
+          selector.includes("dce.avertissement") &&
+          (options.anonymousLink?.visible ?? false),
+        click: async () => {
+          clicked.push(`locator:${selector}`);
+        },
       }),
     }),
     getByText: (pattern: RegExp) => {
@@ -313,6 +328,195 @@ describe("chooseDceCompletIfPrompted", () => {
       chooseDceCompletIfPrompted(page as never, 1_000),
     ).resolves.toBe(false);
     expect(clicked).toEqual([]);
+  });
+});
+
+describe("followAnonymousWithdrawalLinkIfPresented", () => {
+  it("follows the choixDCE anonymous withdrawal link when presented", async () => {
+    const { page, clicked } = fakeChoixDcePage({
+      anonymousLink: { visible: true },
+    });
+
+    await expect(
+      followAnonymousWithdrawalLinkIfPresented(page as never, 1_000),
+    ).resolves.toBe(true);
+    expect(clicked).toEqual([
+      'locator:a[href*="fuseaction=dce.avertissement" i]',
+    ]);
+  });
+
+  it("does nothing when the wall offers no anonymous link", async () => {
+    const { page, clicked } = fakeChoixDcePage({});
+
+    await expect(
+      followAnonymousWithdrawalLinkIfPresented(page as never, 1_000),
+    ).resolves.toBe(false);
+    expect(clicked).toEqual([]);
+  });
+});
+
+type AwSurface = "choixDCE" | "avertissement" | "lots" | "submitted";
+
+// State-machine fake of the AW anonymous-withdrawal journey. `choixDCE` is
+// the 2026-07-20 evening wall: no RETRAIT ANONYME button, no login form, an
+// identification CAPTCHA the flow must NOT fund, and the plain
+// `dce.avertissement` link. Its landing page (`avertissement`) carries the
+// proven RETRAIT ANONYME + #texteCaptcha surface leading to the lot form.
+function fakeAwDiscoverFlow(initialSurface: "choixDCE" | "avertissement") {
+  let surface: AwSurface = initialSurface;
+  const clicked: string[] = [];
+  const captchaSolveSurfaces: string[] = [];
+  let selectAllChecked = false;
+  let lotFormSubmitted = false;
+
+  const captchaPresent = () =>
+    surface === "choixDCE" || surface === "avertissement";
+  const anonymousButtonPattern = /RETRAIT ANONYME/i;
+
+  const locatorFor = (selector: string) => ({
+    count: async () => {
+      if (selector === "#texteCaptcha") return captchaPresent() ? 1 : 0;
+      if (selector === "#selectAll") return surface === "lots" ? 1 : 0;
+      return 0;
+    },
+    inputValue: async () => "",
+    isVisible: async () =>
+      selector.includes("dce.avertissement") && surface === "choixDCE",
+    waitFor: async () => {
+      const visible =
+        selector === "#texteCaptcha, #selectAll" &&
+        (captchaPresent() || surface === "lots");
+      if (!visible) throw new Error(`fixture: not visible (${selector})`);
+    },
+    click: async () => {
+      if (selector.includes("dce.avertissement")) {
+        clicked.push("anonymous-link");
+        if (surface === "choixDCE") surface = "avertissement";
+        return;
+      }
+      clicked.push(selector);
+    },
+    check: async () => {
+      if (selector === "#selectAll" && surface === "lots") {
+        selectAllChecked = true;
+      }
+    },
+  });
+
+  const lotForm = {
+    count: async () => (surface === "lots" ? 1 : 0),
+    evaluate: async () => {
+      lotFormSubmitted = true;
+      surface = "submitted";
+    },
+  };
+
+  const page = {
+    goto: vi.fn(async () => null),
+    locator: (selector: string) => {
+      if (selector === "form") {
+        return { filter: () => ({ first: () => lotForm }) };
+      }
+      return { first: () => locatorFor(selector) };
+    },
+    getByText: (pattern: RegExp) => ({
+      first: () => ({
+        isVisible: async () =>
+          pattern.source === anonymousButtonPattern.source &&
+          surface === "avertissement",
+        waitFor: async () => {
+          if (
+            !(
+              pattern.source === anonymousButtonPattern.source &&
+              surface === "avertissement"
+            )
+          ) {
+            throw new Error(`fixture: not visible (${pattern})`);
+          }
+        },
+        click: async () => {
+          clicked.push("RETRAIT ANONYME");
+          if (surface === "avertissement") surface = "lots";
+        },
+        locator: () => ({ first: () => ({ count: async () => 0 }) }),
+      }),
+    }),
+    waitForNavigation: vi.fn(async () => null),
+    waitForFunction: vi.fn(async () => {
+      captchaSolveSurfaces.push(surface);
+    }),
+    content: async () => "<html>fixture listing</html>",
+    evaluate: async () => "fixture-user-agent",
+  };
+
+  const context = {
+    pages: () => [page],
+    cookies: async () => [
+      { name: "CFID", value: "fixture-cfid" },
+      { name: "CFTOKEN", value: "fixture-cftoken" },
+    ],
+  };
+  const browser = {
+    contexts: () => [context],
+    close: vi.fn(async () => undefined),
+  };
+
+  return {
+    browser,
+    clicked,
+    captchaSolveSurfaces,
+    isSelectAllChecked: () => selectAllChecked,
+    isLotFormSubmitted: () => lotFormSubmitted,
+  };
+}
+
+describe("PlaywrightAwBrowserSession.discover", () => {
+  const request: RecoveryRequest = {
+    jobId: "fixture-job",
+    tenderId: "fixture-tender",
+    sourceField: "link_to_buyer_profile",
+    providedUrl:
+      "https://www.marches-publics.info/mpiaws/index.cfm?fuseaction=dematEnt.login&type=DCE&IDM=1848459",
+    requestedLots: { kind: "all" },
+  };
+
+  function sessionFor(flow: ReturnType<typeof fakeAwDiscoverFlow>) {
+    vi.mocked(chromium.connectOverCDP).mockResolvedValue(
+      flow.browser as never,
+    );
+    return new PlaywrightAwBrowserSession({
+      browserlessToken: "fixture-token",
+      awPortalEmail: "operator@example.test",
+      awPortalPassword: "fixture-password",
+      timeoutMs: 1_000,
+    });
+  }
+
+  it("follows the choixDCE anonymous link then reaches RETRAIT ANONYME", async () => {
+    const flow = fakeAwDiscoverFlow("choixDCE");
+
+    const discovery = await sessionFor(flow).discover(request);
+
+    expect(flow.clicked).toEqual(["anonymous-link", "RETRAIT ANONYME"]);
+    // The single per-attempt CAPTCHA solve is funded on the avertissement
+    // form the flow submits, never on the abandoned choixDCE wall.
+    expect(flow.captchaSolveSurfaces).toEqual(["avertissement"]);
+    expect(flow.isSelectAllChecked()).toBe(true);
+    expect(flow.isLotFormSubmitted()).toBe(true);
+    expect(discovery.consultationId).toBe("1848459");
+    expect(discovery.selectedLots).toEqual(["all"]);
+    expect(flow.browser.close).toHaveBeenCalled();
+  });
+
+  it("keeps the direct RETRAIT ANONYME path without an extra link hop", async () => {
+    const flow = fakeAwDiscoverFlow("avertissement");
+
+    const discovery = await sessionFor(flow).discover(request);
+
+    expect(flow.clicked).toEqual(["RETRAIT ANONYME"]);
+    expect(flow.captchaSolveSurfaces).toEqual(["avertissement"]);
+    expect(flow.isLotFormSubmitted()).toBe(true);
+    expect(discovery.consultationId).toBe("1848459");
   });
 });
 

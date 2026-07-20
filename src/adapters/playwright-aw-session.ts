@@ -185,6 +185,25 @@ export async function clickChoixDceIdentificationIfPrompted(
   return true;
 }
 
+// AW `dematEnt.choixDCE` wall, third variant (proof re-sweep 2026-07-20
+// evening): no RETRAIT ANONYME button and no login form — the anonymous
+// withdrawal sits behind a plain link ("retirer le DCE en mode anonyme",
+// fuseaction=dce.avertissement) whose landing page exposes the surface this
+// adapter already handles (RETRAIT ANONYME + #texteCaptcha +
+// XFAOK=dce.verifLotsDCE).
+const AW_ANONYMOUS_WITHDRAWAL_LINK_SELECTOR =
+  'a[href*="fuseaction=dce.avertissement" i]';
+
+export async function followAnonymousWithdrawalLinkIfPresented(
+  page: Page,
+  timeoutMs: number,
+): Promise<boolean> {
+  const link = page.locator(AW_ANONYMOUS_WITHDRAWAL_LINK_SELECTOR).first();
+  if (!(await link.isVisible().catch(() => false))) return false;
+  await waitForOptionalNavigation(page, () => link.click(), timeoutMs);
+  return true;
+}
+
 export async function chooseDceCompletIfPrompted(
   page: Page,
   timeoutMs: number,
@@ -286,10 +305,24 @@ export class PlaywrightAwBrowserSession implements AwBrowserSession {
         timeout: this.timeoutMs,
       });
       await waitForAwEntrySurface(page, this.timeoutMs);
+
+      const anonymousButton = page.getByText(/RETRAIT ANONYME/i).first();
+      if (!(await anonymousButton.isVisible().catch(() => false))) {
+        // The choixDCE wall may hold its own identification CAPTCHA. Follow
+        // the anonymous-withdrawal link before funding any solve so the
+        // single per-attempt solve is spent on the form this flow actually
+        // submits (the landing page's anonymous RETRAIT form).
+        const followed = await followAnonymousWithdrawalLinkIfPresented(
+          page,
+          this.timeoutMs,
+        );
+        if (followed) {
+          await waitForAwEntrySurface(page, this.timeoutMs);
+        }
+      }
       await waitForCaptchaIfPresent(page, this.timeoutMs, captchaBudget);
 
       let dceCompletChosen = false;
-      const anonymousButton = page.getByText(/RETRAIT ANONYME/i).first();
       if (await anonymousButton.isVisible().catch(() => false)) {
         await waitForOptionalNavigation(
           page,
