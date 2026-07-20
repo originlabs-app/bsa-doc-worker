@@ -242,3 +242,49 @@ cost, status and short issue fields; configured secrets and URLs are redacted.
 
 All READER tests use mocks or generated local fixtures. No development or gate
 command requires or authorizes a production connection.
+
+## ANALYZE — agentic DCE analysis
+
+`src/analyze/` is the worker-side analyst that consumes READER's already
+extracted documents. It is a library boundary only in this lot: it is not wired
+to a queue, the Railway entrypoint or a production database.
+
+```text
+typed READER dossier + company profile + recalled lessons
+  -> bounded Vercel AI SDK agent (OpenRouter, four read-only tools)
+  -> strict Zod criteria and rich summaries per lot
+  -> deterministic score recalculation and redhibitory rules in code
+  -> off | safe dry-run log | injected apply sink
+```
+
+The agent may read bounded text windows, consult the company profile, inspect
+recalled learning and preview redhibitory checks. It never calculates the final
+score and cannot override a redhibitory rule. The code reuses Paul's
+multiplicative five-criterion formula, selects the best accessible lot and
+blocks each lot independently. Invalid structured output gets one bounded
+repair attempt; step and output-token budgets are shared across both attempts.
+
+ANALYZE modes are independent from `RECOVERY_MODE` and `READER_MODE`:
+
+| `ANALYZE_MODE` | Behavior |
+| --- | --- |
+| `off` (default) | Returns before learning recall, model construction or writes. |
+| `dry_run` | Produces and logs a redacted result; it never calls the result sink or records learning-rule usage. Provider calls and read-only lesson recall can still incur cost once a later orchestrator wires them. |
+| `apply` | Requires an explicit injected result sink before analysis. Writes the existing tender/lot/AI-ledger contract, then records approved-rule usage. No concrete production sink or queue wiring exists in this lot. |
+
+Configuration:
+
+```dotenv
+ANALYZE_MODE="off"
+OPENROUTER_MODEL_SCORE="openai/gpt-5.6-terra"
+ANALYZE_MAX_STEPS="8"            # hard maximum: 12
+ANALYZE_MAX_OUTPUT_TOKENS="8192" # hard maximum: 8192
+OPENROUTER_API_KEY=""            # required only outside off
+```
+
+Lesson recall ports `match_ao_lessons`, the approved company rules in
+`scraping_memory`, and `record_scraping_memory_usage`. Recall fails open so a
+memory outage cannot block analysis. The result reports `lessons_count`,
+`rules_count` and `learning_applied`; usage is recorded only after a successful
+apply write. All tests use mocks and fixtures, with no OpenRouter, Supabase or
+Railway connection.

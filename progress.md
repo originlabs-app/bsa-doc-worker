@@ -132,3 +132,41 @@
   été créé. Le coût utilisé est le coût réel retourné dans les metadata
   OpenRouter, agrégé entre retries, pas une estimation locale par token.
 - Statut : `READY_FOR_ORCHESTRATOR_REVIEW`; READER reste OFF.
+
+## 2026-07-20 — WORKER-ANALYZE agentique gelé localement
+
+- Mission : faire du worker l'analyste DCE qui lit le dossier extrait et produit
+  une analyse riche par lot via Vercel AI SDK, tout en laissant le calcul final
+  et les règles rédhibitoires au code.
+- Base et isolation : branche `feat/analyze`, worktree dédié, base exacte
+  `origin/main@827eba85ee1e4377548721baf8992b467da1eb00` (RECOVERY + READER).
+- Module ajouté : `src/analyze/` avec schémas Zod stricts, agent OpenRouter
+  `generateText` + `Output.object`, quatre outils bornés, une seule réparation
+  structurée et budgets globaux partagés entre les tentatives.
+- Doctrine gardée par le code : grille de Paul 30/20/20/15/15 avec gate métier
+  multiplicative, critères inconnus renormalisés, meilleur lot accessible,
+  score zéro et blocage par lot sur rédhibitoire. Le verdict proposé par le
+  modèle n'est jamais utilisé pour calculer ou débloquer le résultat final.
+- Marchés allotis : sortie riche par lot, couverture obligatoire des numéros de
+  lot déjà identifiés par READER et citations limitées aux documents réellement
+  présents dans le dossier.
+- Boucle VC-1211 : port de `match_ao_lessons`, règles company approuvées de
+  `scraping_memory`, embedding `google/gemini-embedding-2` en 768 dimensions et
+  `record_scraping_memory_usage` seulement après une écriture apply réussie.
+  Le résultat trace `lessons_count`, `rules_count` et `learning_applied`.
+- Modes indépendants : `off` par défaut et court-circuit total ; `dry_run`
+  analyse et logue sans sink ni comptage d'usage ; `apply` exige un sink injecté
+  avant tout appel agent. Aucun sink production, queue ou cutover n'est câblé
+  dans ce lot.
+- Commits fonctionnels `[skip ci]` : `56cddae`, `d8a3977`, `c7de8b9`,
+  `6a02f45` ; le commit de checkpoint final suit cette entrée.
+- Gates Node 22 exécutés au premier plan : suite complète 134/134 (24 fichiers),
+  lint vert, typecheck vert, build vert, `npm audit --audit-level=high` =
+  0 vulnérabilité, gitleaks 8.30.1 = 0 fuite sur les 4 commits du lot.
+- Sûreté : aucun appel réel OpenRouter/Supabase, aucune donnée production,
+  aucune écriture BSA, aucun push, merge, deploy, GitHub ou Railway. RECOVERY et
+  READER ne sont pas modifiés hors imports de types existants.
+- Revue finale : budgets de retry cumulés et ancrage documents/lots durcis ;
+  aucun finding bloquant restant sur correction, lisibilité, architecture,
+  sécurité ou performance.
+- Statut : `READY_FOR_ORCHESTRATOR_REVIEW`; `ANALYZE_MODE` reste `off`.
