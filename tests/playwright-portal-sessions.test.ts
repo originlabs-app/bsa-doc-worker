@@ -5,6 +5,7 @@ import {
   authenticatePortalIfPrompted,
   ensureCaptchaSolved,
   extractPortalConsultationId,
+  isSafeManifestControlTarget,
 } from "../src/adapters/playwright-portal-session.js";
 import { PlaywrightMaximilienBrowserSession } from "../src/adapters/playwright-maximilien-session.js";
 import { PlaywrightPlaceBrowserSession } from "../src/adapters/playwright-place-session.js";
@@ -49,7 +50,7 @@ describe("portal Playwright session helpers", () => {
       [submitSelector]: { count: 1 },
     });
 
-    await authenticatePortalIfPrompted(
+    const authenticated = await authenticatePortalIfPrompted(
       page as never,
       { email: "operator@example.test", password: "fixture-password" },
       "PLACE",
@@ -61,6 +62,7 @@ describe("portal Playwright session helpers", () => {
       [passwordSelector, "fixture-password"],
     ]);
     expect(clicked).toEqual([submitSelector]);
+    expect(authenticated).toBe(true);
   });
 
   it("returns a typed block when portal authentication is rejected", async () => {
@@ -136,5 +138,32 @@ describe("portal Playwright session helpers", () => {
         maximilienPortalPassword: "fixture-password",
       }),
     ).toBeInstanceOf(PlaywrightMaximilienBrowserSession);
+  });
+
+  it("never treats an attachment or external URL as a manifest control", () => {
+    const currentUrl =
+      "https://www.marches-publics.gouv.fr/entreprise/consultation/3036454";
+
+    expect(
+      isSafeManifestControlTarget(
+        "/entreprise/consultation/3036454/documents",
+        currentUrl,
+        "marches-publics.gouv.fr",
+      ),
+    ).toBe(true);
+    expect(
+      isSafeManifestControlTarget(
+        "/dce/download/package-3036454",
+        currentUrl,
+        "marches-publics.gouv.fr",
+      ),
+    ).toBe(false);
+    expect(
+      isSafeManifestControlTarget(
+        "https://attacker.invalid/consultation/3036454/documents",
+        currentUrl,
+        "marches-publics.gouv.fr",
+      ),
+    ).toBe(false);
   });
 });

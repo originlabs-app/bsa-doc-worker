@@ -98,12 +98,12 @@ export async function authenticatePortalIfPrompted(
   credentials: PortalCredentials,
   displayName: string,
   timeoutMs: number,
-): Promise<void> {
+): Promise<boolean> {
   const username = page.locator(USERNAME_SELECTOR).first();
   const password = page.locator(PASSWORD_SELECTOR).first();
   const usernameVisible = await username.isVisible().catch(() => false);
   const passwordVisible = await password.isVisible().catch(() => false);
-  if (!usernameVisible && !passwordVisible) return;
+  if (!usernameVisible && !passwordVisible) return false;
   if (!usernameVisible || !passwordVisible) {
     throw new PortalAdapterError(
       "PORTAL_DISCOVERY_BLOCKED",
@@ -134,6 +134,7 @@ export async function authenticatePortalIfPrompted(
       `${displayName} authentication was rejected`,
     );
   }
+  return true;
 }
 
 export async function ensureCaptchaSolved(
@@ -297,18 +298,61 @@ async function selectRequestedLots(
   }
 }
 
-async function revealManifest(page: Page, timeoutMs: number): Promise<void> {
-  const manifestControl = page
-    .getByText(
-      /DCE|documents? de la consultation|pi[eè]ces? de la consultation|dossier de consultation/i,
-    )
-    .first();
-  if (!(await manifestControl.isVisible().catch(() => false))) return;
-  await waitForOptionalNavigation(
-    page,
-    () => manifestControl.click(),
-    timeoutMs,
-  );
+export function isSafeManifestControlTarget(
+  rawTarget: string | null,
+  currentPageUrl: string,
+  rootHost: string,
+): boolean {
+  if (!rawTarget) return true;
+  try {
+    const target = new URL(rawTarget, currentPageUrl);
+    if (
+      target.protocol !== "https:" ||
+      !isHostOrSubdomain(target.hostname.toLowerCase(), rootHost)
+    ) {
+      return false;
+    }
+    const attachmentPath =
+      /\/(?:download|attachment|t[eé]l[eé]charg(?:ement)?)\b/i.test(
+        target.pathname,
+      ) ||
+      /\/dce\/(?:document|pi[eè]ce)\b/i.test(target.pathname) ||
+      /\.(?:pdf|zip)$/i.test(target.pathname);
+    const attachmentAction =
+      (target.searchParams.get("fuseaction") ?? "").toLowerCase() ===
+        "dce.tdoc" || target.searchParams.has("download");
+    return !attachmentPath && !attachmentAction;
+  } catch {
+    return false;
+  }
+}
+
+async function revealManifest(
+  page: Page,
+  timeoutMs: number,
+  rootHost: string,
+): Promise<void> {
+  const controls = page
+    .locator('button, [role="button"], a[href]')
+    .filter({
+      hasText:
+        /DCE|documents? de la consultation|pi[eè]ces? de la consultation|dossier de consultation/i,
+    });
+  const count = Math.min(await controls.count(), 20);
+  for (let index = 0; index < count; index += 1) {
+    const control = controls.nth(index);
+    if (!(await control.isVisible().catch(() => false))) continue;
+    const target =
+      (await control.getAttribute("href")) ??
+      (await control.getAttribute("formaction")) ??
+      (await control.evaluate((element) => {
+        if (!(element instanceof HTMLButtonElement)) return null;
+        return element.form?.action || null;
+      }));
+    if (!isSafeManifestControlTarget(target, page.url(), rootHost)) continue;
+    await waitForOptionalNavigation(page, () => control.click(), timeoutMs);
+    return;
+  }
 }
 
 export class PlaywrightPortalBrowserSession implements PortalBrowserSession {
@@ -345,7 +389,7 @@ export class PlaywrightPortalBrowserSession implements PortalBrowserSession {
         waitUntil: "domcontentloaded",
         timeout: this.timeoutMs,
       });
-      await authenticatePortalIfPrompted(
+      const authenticated = await authenticatePortalIfPrompted(
         page,
         this.options,
         this.options.displayName,
@@ -363,7 +407,7 @@ export class PlaywrightPortalBrowserSession implements PortalBrowserSession {
         this.options,
         this.timeoutMs,
       );
-      if (consultationUrl !== request.providedUrl) {
+      if (consultationUrl !== request.providedUrl || authenticated) {
         await page.goto(consultationUrl, {
           waitUntil: "domcontentloaded",
           timeout: this.timeoutMs,
@@ -381,17 +425,30 @@ export class PlaywrightPortalBrowserSession implements PortalBrowserSession {
         this.options.displayName,
       );
       await selectRequestedLots(page, request, this.options.displayName);
-      await revealManifest(page, this.timeoutMs);
+      await revealManifest(page, this.timeoutMs, this.options.rootHost);
       await ensureCaptchaSolved(
         page,
         this.timeoutMs,
         this.options.displayName,
       );
 
-      const sourceUrl = new URL(consultationUrl);
+      const sourceUrl = new URL(page.url());
+      if (
+        sourceUrl.protocol !== "https:" ||
+        !isHostOrSubdomain(
+          sourceUrl.hostname.toLowerCase(),
+          this.options.rootHost,
+        )
+      ) {
+        throw new PortalAdapterError(
+          "PORTAL_DISCOVERY_BLOCKED",
+          false,
+          `${this.options.displayName} manifest left the allowlisted portal`,
+        );
+      }
       const cookies = await context.cookies([sourceUrl.origin]);
       return {
-        consultationUrl,
+        consultationUrl: sourceUrl.toString(),
         consultationId: extractPortalConsultationId(
           consultationUrl,
           this.options.rootHost,
