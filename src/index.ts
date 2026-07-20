@@ -1,6 +1,7 @@
 export const WORKER_NAME = "bsa-dce-recovery-worker";
 
 export * from "./config.js";
+export * from "./browserless-usage.js";
 export * from "./contracts.js";
 export * from "./download.js";
 export * from "./logger.js";
@@ -9,4 +10,12 @@ export * from "./router.js";
 export * from "./worker.js";
 export * from "./adapters/aw-solutions.js";
 export * from "./adapters/mock-aw-session.js";
+export * from "./adapters/maximilien.js";
+export * from "./adapters/mock-maximilien-session.js";
+export * from "./adapters/mock-place-session.js";
+export * from "./adapters/place.js";
 export * from "./adapters/playwright-aw-session.js";
+export * from "./adapters/playwright-maximilien-session.js";
+export * from "./adapters/playwright-place-session.js";
+export * from "./adapters/portal-adapter-error.js";
+export * from "./adapters/portal-manifest.js";

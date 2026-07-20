@@ -9,11 +9,12 @@ writes, deploys and secret writes require Pierre's explicit authorization.
 
 - Keep every buyer-profile recovery implementation in this repository, never
   in `BSA_COPILOT_PRODUCTION`.
-- MVP manifest adapter: AW Solutions / `marches-publics.info` only.
-- Public equivalence lookup may search AWSolutions and PLACE by title/reference;
-  the PLACE manifest adapter remains blocked until its v2 validation.
-- DILA/BOAMP are publication-only sources, not buyer profiles.
-- TED and all third-party buyer profiles remain out of scope.
+- Manifest adapters are limited to AW Solutions (`marches-publics.info`), PLACE
+  (`marches-publics.gouv.fr`) and Maximilien (`marches.maximilien.fr`).
+- DILA/BOAMP and TED are publication-only sources, not buyer profiles.
+- Every other buyer profile, including
+  `plateforme.alsacemarchespublics.eu`, remains out of scope without a new
+  portal-specific GO from Pierre.
 
 ## Safety
 
@@ -22,10 +23,10 @@ writes, deploys and secret writes require Pierre's explicit authorization.
   attachment URLs, `CFID` or `CFTOKEN`.
 - Browserless discovers attachment links only. Downloads use direct bounded
   HTTP streaming to an injected object sink.
-- Use the exact consultation URL supplied by Nukema when it is final. For a
-  generic or inaccessible URL, search for a strict title/reference equivalent
-  only on AWSolutions and PLACE. Enforce host allowlists and at most two portal
-  attempts per tender.
+- Use the exact consultation URL supplied by Nukema when it is final. A
+  fallback search must resolve a unique exact reference, or a strict title
+  prefix plus buyer, within the adapter's own allowlisted domain. Enforce host
+  allowlists and at most two portal attempts per tender.
 - `.env` is local and ignored. Commit only empty variable names in
   `.env.example`.
 
@@ -45,4 +46,5 @@ npm run worker -- --mode dry_run --provider mock --input tests/fixtures/jobs.jso
 ```
 
 Keep all gates in the foreground. Do not create a GitHub repository, configure
-Railway, deploy, or perform a real portal recipe in the MVP implementation lot.
+Railway, deploy, or perform a real PLACE/Maximilien portal recipe in the
+adapter implementation lot; that recipe belongs to the orchestrator after GO.

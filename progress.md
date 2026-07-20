@@ -212,3 +212,98 @@
   push, merge, deploy, GitHub ou Railway. `ANALYZE_MODE` reste `off`.
 - Revue finale qualité/sécurité : aucun finding bloquant restant.
 - Statut : `READY_FOR_ORCHESTRATOR_REVIEW`.
+## 2026-07-20 — Adaptateurs PLACE + Maximilien gelés localement
+
+- Lot développé dans le worktree dédié
+  `BSA_DCE_RECOVERY_WORKER-adapters-place-maximilien`, branche
+  `feat/adapters-place-maximilien`, depuis `origin/main` au commit `827eba8`.
+- Ajout de deux adaptateurs sur le contrat AW existant : sessions Playwright
+  bornées, login, résolution exacte de consultation, sélection des lots,
+  manifeste sûr, mocks et fixtures séparés pour PLACE et Maximilien.
+- Routage gelé : AW, PLACE et Maximilien vers leurs adaptateurs ; DILA/BOAMP et
+  TED en `publication_only` ; autres domaines en `recovery_blocked`.
+- Sûreté : `off` reste le défaut, `apply` reste bloqué, deux tentatives maximum,
+  CAPTCHA/auth/erreur deviennent des échecs typés, aucune URL signée ni secret
+  dans les rapports ou logs.
+- Browserless est limité à la découverte du manifeste. Les contrôles pouvant
+  télécharger une pièce sont refusés dans la session navigateur ; le transfert
+  futur reste un stream HTTP avec host/path et redirections revalidés.
+- Le CLI réel mesure l'usage officiel Browserless avant/après le lot et
+  journalise uniquement le delta de compte. Une mesure indisponible ou
+  incohérente bloque le lot ; aucune allocation estimée par AO.
+- Preuves finales Node 22, toutes exécutées en avant-plan : RECOVERY 85/85
+  (incluant les 53 tests historiques), READER 54/54 inchangés, suite complète
+  139/139, lint vert, typecheck vert, build vert, `npm audit` = 0 vulnérabilité,
+  gitleaks = aucune fuite sur 28 commits, `git diff --check` vert.
+- Commits fonctionnels `[skip ci]` : `bc288eb`, `e259129`, `f4fe5b9`,
+  `6454036`, `aa8c594`, `6112252`, `6a6a419`; le commit de checkpoint final
+  porte le gel.
+- Aucune recette réelle PLACE/Maximilien, aucun credential utilisé, aucun
+  téléchargement persistant, écriture BSA/prod, push, merge, deploy, GitHub ou
+  Railway. La recette réelle reste à l'orchestrateur après GO.
+- Statut : `READY_FOR_ORCHESTRATOR_REVIEW`; RECOVERY et READER restent OFF.
+
+## 2026-07-20 — ADAPTERS-FIX : les 2 blocages du sweep nocturne corrigés
+
+- Ce que ça change : les 6 AO dont le DCE est en périmètre (5 AW + 1
+  Maximilien) ne sont plus bloqués par l'adaptateur. Les pièces PLACE et
+  Maximilien exposées en query-string Atexo sont maintenant reconnues (plus de
+  manifeste faux-positif « Signer un document »), et le mur AW `choixDCE`
+  est franchi par l'identification Keycloak déjà prouvée, avec un budget
+  CAPTCHA borné.
+- FIX A (commit `4afd7b1`) : `isAttachmentUrl`/`isPortalAttachmentUrl`
+  reconnaissent les actions Atexo `page=Entreprise.EntrepriseDemandeTelechargementDce`
+  et `EntrepriseDownloadReglement` (module partagé `src/adapters/atexo.ts`) ;
+  les liens d'action non-pièce (« Signer un document ») sont exclus du
+  manifeste ; `isSafeManifestControlTarget` ne clique plus un lien de
+  téléchargement Atexo comme contrôle de révélation (la session reste sur la
+  page qui liste les pièces — cause racine du témoin PLACE 3040234) ;
+  identité stable des pièces Atexo via action+id de la query. Fixtures neuves
+  calquées sur Maximilien 942952 et le témoin PLACE.
+- FIX B (commit `f70ed87`) : sur `dematEnt.choixDCE`, clic du lien « VOUS
+  DEVEZ VOUS IDENTIFIER » puis login Keycloak existant inchangé ; choix
+  « DCE complet » géré (lots `all`), formulaire de lots sauté uniquement si
+  le parcours DCE complet l'a remplacé ; `AwCaptchaSolveBudget` finance au
+  plus une résolution Browserless (10 unités) par tentative, au-delà échec
+  `CAPTCHA_UNSOLVED` retryable, et le cap worker de 2 tentatives termine en
+  `recovery_blocked` honnête (`RETRY_CAP_REACHED`).
+- Périmètre respecté : READER et ANALYZE intacts, aucun credential utilisé,
+  lot 100 % mocks/fixtures, pas de recette réelle (réservée à
+  l'orchestrateur), pas de push.
+- Gates avant-plan : suite complète 158/158 (139 existants + 19 nouveaux,
+  zéro régression), lint vert, typecheck vert, build vert,
+  `npm audit --audit-level=high` = 0 vulnérabilité, gitleaks = 0 fuite sur
+  41 commits, `git diff --check` vert, smoke mock dry-run `manifest_ready`
+  3 pièces sans écriture.
+- Corpus réel futur (recette orchestrateur) : AW IDM 1848852 / 1849180 /
+  1848459 / 1840818 / 1846761 et Maximilien 942952.
+- Statut : ADAPTERS-FIX GELÉ, prêt pour recette réelle orchestrateur.
+
+## 2026-07-20 (nuit) — FIX C mur AW choixDCE (lien anonyme) + re-preuve réelle
+
+- FIX C (commit `b6fd0d7`) : sur `dematEnt.choixDCE`, si le bouton RETRAIT
+  ANONYME est absent, suivre le lien « retirer le DCE en mode anonyme »
+  (`a[href*="fuseaction=dce.avertissement" i]`) AVANT toute dépense captcha
+  (le mur porte son propre `#texteCaptcha` d'identification qu'on abandonne) ;
+  la page d'arrivée expose la surface déjà gérée (RETRAIT ANONYME +
+  `#texteCaptcha` + verifLotsDCE). Bouton direct et identification Keycloak
+  gardés en fallback. + commit `d91d4f3` : event stderr
+  `adapter_attempt_failed` avec errorDetail statique (le run 1 réel était
+  indiagnosticable au seul reasonCode) ; contrat stdout inchangé.
+- Tests 158 → 163 (helper ×2, flux discover complet ×2 avec assertion
+  « solve financé sur avertissement, jamais sur choixDCE », worker ×1).
+  Gates avant-plan vertes aux 2 commits : test:ci, lint, typecheck, build.
+- Re-preuve réelle AW Saint-Gilles IDM 1848459 (dry_run strict, cap 40 u,
+  2 tentatives) : mur choixDCE FRANCHI (plus de PROFILE_LINK_NOT_FINAL,
+  52,9 s puis 52,7 s au lieu de 143 s), mais MANIFESTE NON OBTENU —
+  `ADAPTER_FAILURE / "AW select-all control is unavailable"` ×2. Diagnostic
+  prouvé par sonde HTTP gratuite : POST captcha faux → 302
+  `dce.avertissement&typeErreur=captcha` (rebond silencieux, 0 `#selectAll`)
+  = signature exacte ; Browserless a rempli le captcha image custom FAUX aux
+  2 tentatives (l'aléa connu, solves facturés). 22 unités (195 → 217, stable),
+  0 téléchargement, 0 écriture BSA (`productionWriteOccurred=false` ×2).
+- Candidat FIX D (non implémenté) : détecter `typeErreur=captcha` après le
+  clic RETRAIT ANONYME → `CAPTCHA_UNSOLVED` retryable (refinance un captcha
+  frais en tentative 2 interne) au lieu d'ADAPTER_FAILURE non-retryable.
+- Rapport complet : `reports/proof-sweep-20260721.md` (section FIX C).
+- Statut : ADAPTERS-FIX-C GELÉ (code aux commits `b6fd0d7` + `d91d4f3`).

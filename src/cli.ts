@@ -6,21 +6,50 @@ import {
   AwSolutionsAdapter,
 } from "./adapters/aw-solutions.js";
 import { MockAwBrowserSession } from "./adapters/mock-aw-session.js";
+import { MockMaximilienBrowserSession } from "./adapters/mock-maximilien-session.js";
+import { MockPlaceBrowserSession } from "./adapters/mock-place-session.js";
+import { MaximilienAdapter } from "./adapters/maximilien.js";
+import { PlaceAdapter } from "./adapters/place.js";
 import { PlaywrightAwBrowserSession } from "./adapters/playwright-aw-session.js";
+import { PlaywrightMaximilienBrowserSession } from "./adapters/playwright-maximilien-session.js";
+import { PlaywrightPlaceBrowserSession } from "./adapters/playwright-place-session.js";
+import { PortalAdapterError } from "./adapters/portal-adapter-error.js";
+import {
+  BrowserlessUsageClient,
+  calculateBrowserlessUsageDelta,
+  type BrowserlessUsageReader,
+  type BrowserlessUsageSnapshot,
+} from "./browserless-usage.js";
 import {
   loadWorkerConfig,
+  missingRealSecretsForPlatform,
   parseWorkerSecretEnv,
   type WorkerConfig,
 } from "./config.js";
-import { RecoveryRequestSchema } from "./contracts.js";
+import {
+  RecoveryRequestSchema,
+  type RecoveryRequest,
+} from "./contracts.js";
 import { JsonLineLogger, type TextOutput } from "./logger.js";
 import type { BuyerProfileAdapter } from "./ports.js";
+import { routePortal } from "./router.js";
 import { runRecovery } from "./worker.js";
 
 export interface CliIo {
   readInput(path: string): Promise<string>;
   stdout: TextOutput;
   stderr: TextOutput;
+}
+
+export interface CliAdapters {
+  awAdapter: BuyerProfileAdapter;
+  placeAdapter: BuyerProfileAdapter;
+  maximilienAdapter: BuyerProfileAdapter;
+}
+
+export interface CliDependencies {
+  adapterFactory?: (config: WorkerConfig) => CliAdapters;
+  usageReaderFactory?: (token: string) => BrowserlessUsageReader;
 }
 
 interface CliArgs {
@@ -54,41 +83,118 @@ function parseArgs(argv: string[]): CliArgs {
   return parsed as CliArgs;
 }
 
-function createRealAdapter(config: WorkerConfig): BuyerProfileAdapter {
-  if (
-    !config.browserlessToken ||
-    !config.awPortalEmail ||
-    !config.awPortalPassword
-  ) {
-    return {
-      discover: async () => {
-        throw new AwAdapterError(
-          "MISSING_REAL_SECRETS",
-          false,
-          "Real adapter secrets are unavailable",
-        );
-      },
-    };
-  }
-  return new AwSolutionsAdapter(
-    new PlaywrightAwBrowserSession({
-      browserlessToken: config.browserlessToken,
-      awPortalEmail: config.awPortalEmail,
-      awPortalPassword: config.awPortalPassword,
-    }),
-  );
+function unavailableAwAdapter(): BuyerProfileAdapter {
+  return {
+    discover: async () => {
+      throw new AwAdapterError(
+        "MISSING_REAL_SECRETS",
+        false,
+        "Real AW adapter secrets are unavailable",
+      );
+    },
+  };
 }
 
-function createAdapter(config: WorkerConfig): BuyerProfileAdapter {
+function unavailablePortalAdapter(): BuyerProfileAdapter {
+  return {
+    discover: async () => {
+      throw new PortalAdapterError(
+        "PORTAL_DISCOVERY_BLOCKED",
+        false,
+        "Real portal adapter secrets are unavailable",
+      );
+    },
+  };
+}
+
+function createRealAdapters(config: WorkerConfig): CliAdapters {
+  const {
+    browserlessToken,
+    awPortalEmail,
+    awPortalPassword,
+    placePortalEmail,
+    placePortalPassword,
+    maximilienPortalEmail,
+    maximilienPortalPassword,
+  } = config;
+
+  const awAdapter =
+    browserlessToken && awPortalEmail && awPortalPassword
+      ? new AwSolutionsAdapter(
+          new PlaywrightAwBrowserSession({
+            browserlessToken,
+            awPortalEmail,
+            awPortalPassword,
+          }),
+        )
+      : unavailableAwAdapter();
+  const placeAdapter =
+    browserlessToken && placePortalEmail && placePortalPassword
+      ? new PlaceAdapter(
+          new PlaywrightPlaceBrowserSession({
+            browserlessToken,
+            placePortalEmail,
+            placePortalPassword,
+          }),
+        )
+      : unavailablePortalAdapter();
+  const maximilienAdapter =
+    browserlessToken && maximilienPortalEmail && maximilienPortalPassword
+      ? new MaximilienAdapter(
+          new PlaywrightMaximilienBrowserSession({
+            browserlessToken,
+            maximilienPortalEmail,
+            maximilienPortalPassword,
+          }),
+        )
+      : unavailablePortalAdapter();
+
+  return { awAdapter, placeAdapter, maximilienAdapter };
+}
+
+function createMockAdapters(): CliAdapters {
+  return {
+    awAdapter: new AwSolutionsAdapter(new MockAwBrowserSession()),
+    placeAdapter: new PlaceAdapter(new MockPlaceBrowserSession()),
+    maximilienAdapter: new MaximilienAdapter(
+      new MockMaximilienBrowserSession(),
+    ),
+  };
+}
+
+function createAdapters(config: WorkerConfig): CliAdapters {
   return config.provider === "mock"
-    ? new AwSolutionsAdapter(new MockAwBrowserSession())
-    : createRealAdapter(config);
+    ? createMockAdapters()
+    : createRealAdapters(config);
+}
+
+function countMeteredRequests(
+  requests: RecoveryRequest[],
+  config: WorkerConfig,
+): number {
+  if (config.mode !== "dry_run" || config.provider !== "real") return 0;
+  return requests.filter((request) => {
+    const route = routePortal(request.providedUrl);
+    return (
+      route.disposition === "adapter" &&
+      missingRealSecretsForPlatform(config, route.platform).length === 0
+    );
+  }).length;
+}
+
+function createUsageReader(
+  token: string,
+  dependencies: CliDependencies,
+): BrowserlessUsageReader {
+  return dependencies.usageReaderFactory?.(token) ??
+    new BrowserlessUsageClient(token);
 }
 
 export async function runCli(
   argv: string[],
   env: Readonly<Record<string, string | undefined>>,
   io: CliIo = REAL_IO,
+  dependencies: CliDependencies = {},
 ): Promise<number> {
   try {
     const args = parseArgs(argv);
@@ -103,24 +209,78 @@ export async function runCli(
         ? {}
         : { RECOVERY_PROVIDER: args.provider }),
     });
-    const adapter = createAdapter(config);
     const logger = new JsonLineLogger(io.stderr);
     const input = await io.readInput(args.input);
     const lines = input.split(/\r?\n/).filter((line) => line.trim());
     if (lines.length === 0) throw new Error("empty input");
+    const requests = lines.map((line) =>
+      RecoveryRequestSchema.parse(JSON.parse(line)),
+    );
+    const adapters =
+      dependencies.adapterFactory?.(config) ?? createAdapters(config);
+    const meteredRequestCount = countMeteredRequests(requests, config);
+    const usageReader =
+      meteredRequestCount > 0 && config.browserlessToken
+        ? createUsageReader(config.browserlessToken, dependencies)
+        : undefined;
+    let usageBefore: BrowserlessUsageSnapshot | undefined;
+    if (usageReader) {
+      try {
+        usageBefore = await usageReader.snapshot();
+      } catch {
+        logger.info("browserless_usage", {
+          status: "unavailable",
+          phase: "before_batch",
+          scope: "account_batch_delta",
+          requestCount: meteredRequestCount,
+        });
+        return 2;
+      }
+    }
 
     let exitCode = 0;
-    for (const line of lines) {
-      const request = RecoveryRequestSchema.parse(JSON.parse(line));
-      const report = await runRecovery(request, config, {
-        awAdapter: adapter,
-        logger,
-      });
-      io.stdout.write(`${JSON.stringify(report)}\n`);
-      if (report.status === "recovery_blocked" || report.status === "failed") {
+    let processingError: unknown;
+    try {
+      for (const request of requests) {
+        const report = await runRecovery(request, config, {
+          ...adapters,
+          logger,
+        });
+        io.stdout.write(`${JSON.stringify(report)}\n`);
+        if (
+          report.status === "recovery_blocked" ||
+          report.status === "failed"
+        ) {
+          exitCode = 2;
+        }
+      }
+    } catch (error) {
+      processingError = error;
+    }
+
+    if (usageReader && usageBefore) {
+      try {
+        const delta = calculateBrowserlessUsageDelta(
+          usageBefore,
+          await usageReader.snapshot(),
+        );
+        logger.info("browserless_usage", {
+          status: "measured",
+          scope: "account_batch_delta",
+          requestCount: meteredRequestCount,
+          ...delta,
+        });
+      } catch {
+        logger.info("browserless_usage", {
+          status: "unavailable",
+          phase: "after_batch",
+          scope: "account_batch_delta",
+          requestCount: meteredRequestCount,
+        });
         exitCode = 2;
       }
     }
+    if (processingError) throw processingError;
     return exitCode;
   } catch {
     io.stderr.write(`${JSON.stringify({ error: "INVALID_INPUT" })}\n`);

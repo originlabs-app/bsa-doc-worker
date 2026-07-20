@@ -1,9 +1,13 @@
-import type { Platform, ReasonCode } from "./contracts.js";
+import type {
+  AdapterPlatform,
+  Platform,
+  ReasonCode,
+} from "./contracts.js";
 
 export type PortalRoute =
-  | { platform: "aw_solutions"; disposition: "adapter" }
+  | { platform: AdapterPlatform; disposition: "adapter" }
   | {
-      platform: Exclude<Platform, "aw_solutions">;
+      platform: Exclude<Platform, AdapterPlatform>;
       disposition: "publication_only" | "blocked";
       reasonCode: ReasonCode;
     };
@@ -20,10 +24,18 @@ export function routePortal(rawUrl: string): PortalRoute {
   }
 
   if (isHostOrSubdomain(hostname, "marches-publics.gouv.fr")) {
+    return { platform: "place", disposition: "adapter" };
+  }
+
+  if (isHostOrSubdomain(hostname, "marches.maximilien.fr")) {
+    return { platform: "maximilien", disposition: "adapter" };
+  }
+
+  if (isHostOrSubdomain(hostname, "ted.europa.eu")) {
     return {
-      platform: "place",
-      disposition: "blocked",
-      reasonCode: "PLACE_V2_PENDING_VALIDATION",
+      platform: "ted",
+      disposition: "publication_only",
+      reasonCode: "TED_PUBLICATION_ONLY",
     };
   }
 

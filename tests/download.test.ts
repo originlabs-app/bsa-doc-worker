@@ -131,4 +131,89 @@ describe("streamAttachment", () => {
     expect(fetcher).toHaveBeenCalledOnce();
     expect(target.sink.open).not.toHaveBeenCalled();
   });
+
+  it.each([
+    {
+      sourcePlatform: "place" as const,
+      downloadUrl:
+        "https://telechargement.marches-publics.gouv.fr/dce/download/package-3036454?token=fixture",
+    },
+    {
+      sourcePlatform: "maximilien" as const,
+      downloadUrl:
+        "https://fichiers.marches.maximilien.fr/dce/attachment/package-7788?token=fixture",
+    },
+    {
+      sourcePlatform: "place" as const,
+      downloadUrl:
+        "https://www.marches-publics.gouv.fr/index.php?page=Entreprise.EntrepriseDownloadReglement&id=3040234&orgAcronyme=fixture",
+    },
+    {
+      sourcePlatform: "maximilien" as const,
+      downloadUrl:
+        "https://marches.maximilien.fr/index.php?page=Entreprise.EntrepriseDemandeTelechargementDce&id=942952&orgAcronyme=fixture",
+    },
+  ])(
+    "streams an allowlisted $sourcePlatform attachment over HTTP",
+    async ({ sourcePlatform, downloadUrl }) => {
+      const bytes = Buffer.from("%PDF-1.7\nportal fixture");
+      const fetcher = vi.fn(async () =>
+        new Response(bytes, {
+          status: 200,
+          headers: { "Content-Type": "application/pdf" },
+        }),
+      );
+      const target = fakeSink();
+
+      await expect(
+        streamAttachment(
+          attachment({ sourcePlatform, downloadUrl }),
+          target.sink,
+          { fetcher },
+        ),
+      ).resolves.toMatchObject({ bytes: bytes.byteLength });
+
+      expect(target.commit).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("rejects an Atexo query-string action that is not a download action", async () => {
+    const fetcher = vi.fn();
+    const target = fakeSink();
+
+    await expect(
+      streamAttachment(
+        attachment({
+          sourcePlatform: "maximilien",
+          downloadUrl:
+            "https://marches.maximilien.fr/index.php?page=Entreprise.EntrepriseSignatureDocument&id=942952",
+        }),
+        target.sink,
+        { fetcher },
+      ),
+    ).rejects.toThrow("DOWNLOAD_INCOMPLETE");
+
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(target.sink.open).not.toHaveBeenCalled();
+  });
+
+  it("rejects a URL whose host does not match its source platform", async () => {
+    const fetcher = vi.fn();
+    const target = fakeSink();
+
+    await expect(
+      streamAttachment(
+        attachment({
+          sourcePlatform: "place",
+          downloadUrl:
+            "https://fichiers.marches.maximilien.fr/dce/attachment/package-7788",
+        }),
+        target.sink,
+        { fetcher },
+      ),
+    ).rejects.toThrow("DOWNLOAD_INCOMPLETE");
+
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(target.sink.open).not.toHaveBeenCalled();
+  });
 });

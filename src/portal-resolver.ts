@@ -1,6 +1,19 @@
 import { load } from "cheerio";
 
-export type PortalName = "aw_solutions" | "place";
+export type PortalName = "aw_solutions" | "place" | "maximilien";
+
+export interface PortalConsultationCandidate {
+  canonicalTitle: string;
+  reference: string;
+  buyerName: string;
+  consultationUrl: string;
+}
+
+interface PortalResolutionHints {
+  reference?: string | undefined;
+  title?: string | undefined;
+  buyerName?: string | undefined;
+}
 
 export type PortalSearchOutcome =
   | {
@@ -51,6 +64,51 @@ function normalize(value: string): string {
     .trim()
     .replaceAll(/\s+/g, " ")
     .toLowerCase();
+}
+
+function isHostOrSubdomain(hostname: string, root: string): boolean {
+  return hostname === root || hostname.endsWith(`.${root}`);
+}
+
+export function resolveExactPortalConsultation(
+  candidates: readonly PortalConsultationCandidate[],
+  hints: PortalResolutionHints,
+  rootHost: string,
+): string {
+  const safeCandidates = candidates.filter((candidate) => {
+    try {
+      const url = new URL(candidate.consultationUrl);
+      return (
+        url.protocol === "https:" &&
+        isHostOrSubdomain(url.hostname.toLowerCase(), rootHost)
+      );
+    } catch {
+      return false;
+    }
+  });
+
+  const normalizedReference = normalize(hints.reference ?? "");
+  const matches = normalizedReference
+    ? safeCandidates.filter(
+        (candidate) => normalize(candidate.reference) === normalizedReference,
+      )
+    : safeCandidates.filter((candidate) => {
+        const normalizedTitle = normalize(hints.title ?? "");
+        if (normalizedTitle.length < 20) return false;
+        if (!normalize(candidate.canonicalTitle).startsWith(normalizedTitle)) {
+          return false;
+        }
+        const normalizedBuyer = normalize(hints.buyerName ?? "");
+        return (
+          normalizedBuyer.length === 0 ||
+          normalize(candidate.buyerName) === normalizedBuyer
+        );
+      });
+
+  if (matches.length !== 1) {
+    throw new Error("PORTAL_CONSULTATION_NOT_RESOLVED");
+  }
+  return matches[0]!.consultationUrl;
 }
 
 function isExactPrefix(candidateTitle: string, truncatedTitle: string): boolean {

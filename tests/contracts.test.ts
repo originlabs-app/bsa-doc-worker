@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { loadWorkerConfig, parseWorkerSecretEnv } from "../src/config.js";
+import {
+  loadWorkerConfig,
+  missingRealSecretsForPlatform,
+  parseWorkerSecretEnv,
+} from "../src/config.js";
 import { RecoveryRequestSchema } from "../src/contracts.js";
 
 describe("RecoveryRequestSchema", () => {
@@ -49,6 +53,26 @@ describe("loadWorkerConfig", () => {
       "AW_PORTAL_PASSWORD",
     ]);
   });
+
+  it("requires only the credentials for the routed real portal", () => {
+    const config = loadWorkerConfig({
+      RECOVERY_MODE: "dry_run",
+      RECOVERY_PROVIDER: "real",
+      BROWSERLESS_TOKEN: "fixture-token",
+      PLACE_PORTAL_EMAIL: "place@example.test",
+      PLACE_PORTAL_PASSWORD: "place-password",
+    });
+
+    expect(missingRealSecretsForPlatform(config, "place")).toEqual([]);
+    expect(missingRealSecretsForPlatform(config, "maximilien")).toEqual([
+      "MAXIMILIEN_PORTAL_EMAIL",
+      "MAXIMILIEN_PORTAL_PASSWORD",
+    ]);
+    expect(missingRealSecretsForPlatform(config, "aw_solutions")).toEqual([
+      "AW_PORTAL_EMAIL",
+      "AW_PORTAL_PASSWORD",
+    ]);
+  });
 });
 
 describe("parseWorkerSecretEnv", () => {
@@ -69,5 +93,23 @@ describe("parseWorkerSecretEnv", () => {
         "AW_PORTAL_PASSWORD=first\nAW_PORTAL_PASSWORD=second\n",
       ),
     ).toThrow("DUPLICATE_WORKER_SECRET");
+  });
+
+  it("loads PLACE and Maximilien credentials without exposing their values", () => {
+    const parsed = parseWorkerSecretEnv(
+      [
+        "PLACE_PORTAL_EMAIL=place@example.test",
+        "PLACE_PORTAL_PASSWORD=place#fixture",
+        "MAXIMILIEN_PORTAL_EMAIL=max@example.test",
+        "MAXIMILIEN_PORTAL_PASSWORD=max#fixture",
+      ].join("\n"),
+    );
+
+    expect(Object.keys(parsed).sort()).toEqual([
+      "MAXIMILIEN_PORTAL_EMAIL",
+      "MAXIMILIEN_PORTAL_PASSWORD",
+      "PLACE_PORTAL_EMAIL",
+      "PLACE_PORTAL_PASSWORD",
+    ]);
   });
 });
