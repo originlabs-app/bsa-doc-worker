@@ -194,6 +194,33 @@ describe("runRecovery", () => {
     }
   });
 
+  it("logs the static adapter error detail for each failed attempt", async () => {
+    const info = vi.fn();
+    const discover = vi.fn(async () => {
+      throw new AwAdapterError(
+        "ADAPTER_FAILURE",
+        false,
+        "AW select-all control is unavailable",
+      );
+    });
+    const report = await runRecovery(
+      requestFor("https://www.marches-publics.info/consultation?IDM=1848459"),
+      loadWorkerConfig({ RECOVERY_MODE: "dry_run" }),
+      { awAdapter: { discover }, logger: { info } },
+    );
+
+    expect(report.status).toBe("failed");
+    expect(info).toHaveBeenCalledWith("adapter_attempt_failed", {
+      jobId: "job-1",
+      tenderId: "tender-1",
+      platform: "aw_solutions",
+      attempt: 1,
+      reasonCode: "ADAPTER_FAILURE",
+      retryable: false,
+      errorDetail: "AW select-all control is unavailable",
+    });
+  });
+
   it("blocks a rejected AW login after one attempt", async () => {
     const discover = vi.fn(async () => {
       throw new AwAdapterError(

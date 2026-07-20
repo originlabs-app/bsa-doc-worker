@@ -153,6 +153,18 @@ export async function runRecovery(
                 true,
                 "Portal adapter failure",
               );
+      // Adapter error messages are static literals (no cookie, token or URL
+      // material); surfacing them makes a blocked run diagnosable without
+      // widening the stdout report contract.
+      dependencies.logger?.info("adapter_attempt_failed", {
+        jobId: request.jobId,
+        tenderId: request.tenderId,
+        platform: route.platform,
+        attempt,
+        reasonCode: adapterError.reasonCode,
+        retryable: adapterError.retryable,
+        errorDetail: adapterError.message,
+      });
       if (adapterError.retryable && attempt < MAX_ATTEMPTS_PER_TENDER) {
         continue;
       }
