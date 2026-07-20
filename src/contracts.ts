@@ -46,16 +46,24 @@ export type RecoveryProvider = z.infer<typeof RecoveryProviderSchema>;
 export type RecoveryRequest = z.infer<typeof RecoveryRequestSchema>;
 export type RequestedLots = z.infer<typeof RequestedLotsSchema>;
 
-export type Platform = "aw_solutions" | "place" | "dila" | "unsupported";
+export type AdapterPlatform = "aw_solutions" | "place" | "maximilien";
+export type Platform =
+  | AdapterPlatform
+  | "dila"
+  | "ted"
+  | "unsupported";
 
 export type ReasonCode =
   | "WORKER_OFF"
   | "DILA_PUBLICATION_ONLY"
+  | "TED_PUBLICATION_ONLY"
   | "PLACE_V2_PENDING_VALIDATION"
   | "UNSUPPORTED_PORTAL"
   | "MISSING_REAL_SECRETS"
   | "CAPTCHA_UNSOLVED"
   | "AW_AUTHENTICATION_REJECTED"
+  | "PORTAL_AUTHENTICATION_REJECTED"
+  | "PORTAL_DISCOVERY_BLOCKED"
   | "PROFILE_LINK_NOT_FINAL"
   | "DOWNLOAD_INCOMPLETE"
   | "RETRY_CAP_REACHED"

@@ -1,6 +1,7 @@
 import {
   RecoveryModeSchema,
   RecoveryProviderSchema,
+  type AdapterPlatform,
   type RecoveryMode,
   type RecoveryProvider,
 } from "./contracts.js";
@@ -9,6 +10,10 @@ const REAL_SECRET_NAMES = [
   "BROWSERLESS_TOKEN",
   "AW_PORTAL_EMAIL",
   "AW_PORTAL_PASSWORD",
+  "PLACE_PORTAL_EMAIL",
+  "PLACE_PORTAL_PASSWORD",
+  "MAXIMILIEN_PORTAL_EMAIL",
+  "MAXIMILIEN_PORTAL_PASSWORD",
 ] as const;
 
 export type RealSecretName = (typeof REAL_SECRET_NAMES)[number];
@@ -45,6 +50,10 @@ export interface WorkerConfig {
   browserlessToken: string | undefined;
   awPortalEmail: string | undefined;
   awPortalPassword: string | undefined;
+  placePortalEmail: string | undefined;
+  placePortalPassword: string | undefined;
+  maximilienPortalEmail: string | undefined;
+  maximilienPortalPassword: string | undefined;
   missingRealSecrets: RealSecretName[];
 }
 
@@ -63,11 +72,21 @@ export function loadWorkerConfig(
   const browserlessToken = nonEmpty(env.BROWSERLESS_TOKEN);
   const awPortalEmail = nonEmpty(env.AW_PORTAL_EMAIL);
   const awPortalPassword = nonEmpty(env.AW_PORTAL_PASSWORD);
+  const placePortalEmail = nonEmpty(env.PLACE_PORTAL_EMAIL);
+  const placePortalPassword = nonEmpty(env.PLACE_PORTAL_PASSWORD);
+  const maximilienPortalEmail = nonEmpty(env.MAXIMILIEN_PORTAL_EMAIL);
+  const maximilienPortalPassword = nonEmpty(
+    env.MAXIMILIEN_PORTAL_PASSWORD,
+  );
 
   const byName: Record<RealSecretName, string | undefined> = {
     BROWSERLESS_TOKEN: browserlessToken,
     AW_PORTAL_EMAIL: awPortalEmail,
     AW_PORTAL_PASSWORD: awPortalPassword,
+    PLACE_PORTAL_EMAIL: placePortalEmail,
+    PLACE_PORTAL_PASSWORD: placePortalPassword,
+    MAXIMILIEN_PORTAL_EMAIL: maximilienPortalEmail,
+    MAXIMILIEN_PORTAL_PASSWORD: maximilienPortalPassword,
   };
 
   return {
@@ -76,9 +95,56 @@ export function loadWorkerConfig(
     browserlessToken,
     awPortalEmail,
     awPortalPassword,
+    placePortalEmail,
+    placePortalPassword,
+    maximilienPortalEmail,
+    maximilienPortalPassword,
     missingRealSecrets:
       provider === "real"
-        ? REAL_SECRET_NAMES.filter((name) => byName[name] === undefined)
+        ? ([
+            "BROWSERLESS_TOKEN",
+            "AW_PORTAL_EMAIL",
+            "AW_PORTAL_PASSWORD",
+          ] as const).filter((name) => byName[name] === undefined)
         : [],
   };
+}
+
+const REQUIRED_REAL_SECRETS: Readonly<
+  Record<AdapterPlatform, readonly RealSecretName[]>
+> = {
+  aw_solutions: [
+    "BROWSERLESS_TOKEN",
+    "AW_PORTAL_EMAIL",
+    "AW_PORTAL_PASSWORD",
+  ],
+  place: [
+    "BROWSERLESS_TOKEN",
+    "PLACE_PORTAL_EMAIL",
+    "PLACE_PORTAL_PASSWORD",
+  ],
+  maximilien: [
+    "BROWSERLESS_TOKEN",
+    "MAXIMILIEN_PORTAL_EMAIL",
+    "MAXIMILIEN_PORTAL_PASSWORD",
+  ],
+};
+
+export function missingRealSecretsForPlatform(
+  config: WorkerConfig,
+  platform: AdapterPlatform,
+): RealSecretName[] {
+  if (config.provider !== "real") return [];
+  const values: Record<RealSecretName, string | undefined> = {
+    BROWSERLESS_TOKEN: config.browserlessToken,
+    AW_PORTAL_EMAIL: config.awPortalEmail,
+    AW_PORTAL_PASSWORD: config.awPortalPassword,
+    PLACE_PORTAL_EMAIL: config.placePortalEmail,
+    PLACE_PORTAL_PASSWORD: config.placePortalPassword,
+    MAXIMILIEN_PORTAL_EMAIL: config.maximilienPortalEmail,
+    MAXIMILIEN_PORTAL_PASSWORD: config.maximilienPortalPassword,
+  };
+  return REQUIRED_REAL_SECRETS[platform].filter(
+    (name) => values[name] === undefined,
+  );
 }

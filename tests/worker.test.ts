@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { AwAdapterError } from "../src/adapters/aw-solutions.js";
+import { PortalAdapterError } from "../src/adapters/portal-adapter-error.js";
 import { loadWorkerConfig } from "../src/config.js";
 import type { RecoveryRequest } from "../src/contracts.js";
 import type { BuyerProfileAdapter } from "../src/ports.js";
@@ -89,17 +90,32 @@ describe("runRecovery", () => {
     expect(adapter.discover).not.toHaveBeenCalled();
   });
 
-  it("blocks PLACE without invoking the AW adapter", async () => {
-    const adapter = successfulAdapter();
+  it("dispatches PLACE without invoking the AW adapter", async () => {
+    const awAdapter = successfulAdapter();
+    const placeAdapter = successfulAdapter();
     const report = await runRecovery(
       requestFor("https://www.marches-publics.gouv.fr/consultation/123"),
       loadWorkerConfig({ RECOVERY_MODE: "dry_run" }),
-      { awAdapter: adapter },
+      { awAdapter, placeAdapter },
     );
 
-    expect(report.status).toBe("recovery_blocked");
-    expect(report.reasonCode).toBe("PLACE_V2_PENDING_VALIDATION");
-    expect(adapter.discover).not.toHaveBeenCalled();
+    expect(report.status).toBe("manifest_ready");
+    expect(awAdapter.discover).not.toHaveBeenCalled();
+    expect(placeAdapter.discover).toHaveBeenCalledOnce();
+  });
+
+  it("dispatches Maximilien without invoking the AW adapter", async () => {
+    const awAdapter = successfulAdapter();
+    const maximilienAdapter = successfulAdapter();
+    const report = await runRecovery(
+      requestFor("https://marches.maximilien.fr/consultation/456"),
+      loadWorkerConfig({ RECOVERY_MODE: "dry_run" }),
+      { awAdapter, maximilienAdapter },
+    );
+
+    expect(report.status).toBe("manifest_ready");
+    expect(awAdapter.discover).not.toHaveBeenCalled();
+    expect(maximilienAdapter.discover).toHaveBeenCalledOnce();
   });
 
   it("blocks apply before discovery or any write-capable dependency", async () => {
@@ -165,5 +181,49 @@ describe("runRecovery", () => {
     expect(report.reasonCode).toBe("AW_AUTHENTICATION_REJECTED");
     expect(report.attemptsUsed).toBe(1);
     expect(discover).toHaveBeenCalledTimes(1);
+  });
+
+  it("blocks a portal discovery failure without changing AW semantics", async () => {
+    const discover = vi.fn(async () => {
+      throw new PortalAdapterError(
+        "PORTAL_DISCOVERY_BLOCKED",
+        false,
+        "fixture failure",
+      );
+    });
+    const report = await runRecovery(
+      requestFor("https://marches.maximilien.fr/consultation/456"),
+      loadWorkerConfig({ RECOVERY_MODE: "dry_run" }),
+      {
+        awAdapter: successfulAdapter(),
+        maximilienAdapter: { discover },
+      },
+    );
+
+    expect(report.status).toBe("recovery_blocked");
+    expect(report.reasonCode).toBe("PORTAL_DISCOVERY_BLOCKED");
+    expect(report.attemptsUsed).toBe(1);
+  });
+
+  it("caps retryable Maximilien failures at two attempts", async () => {
+    const discover = vi.fn(async () => {
+      throw new PortalAdapterError(
+        "CAPTCHA_UNSOLVED",
+        true,
+        "fixture failure",
+      );
+    });
+    const report = await runRecovery(
+      requestFor("https://marches.maximilien.fr/consultation/456"),
+      loadWorkerConfig({ RECOVERY_MODE: "dry_run" }),
+      {
+        awAdapter: successfulAdapter(),
+        maximilienAdapter: { discover },
+      },
+    );
+
+    expect(report.status).toBe("recovery_blocked");
+    expect(report.reasonCode).toBe("RETRY_CAP_REACHED");
+    expect(discover).toHaveBeenCalledTimes(2);
   });
 });

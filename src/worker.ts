@@ -1,5 +1,9 @@
 import { AwAdapterError } from "./adapters/aw-solutions.js";
-import type { WorkerConfig } from "./config.js";
+import { PortalAdapterError } from "./adapters/portal-adapter-error.js";
+import {
+  missingRealSecretsForPlatform,
+  type WorkerConfig,
+} from "./config.js";
 import type { RecoveryReport, RecoveryRequest } from "./contracts.js";
 import type { WorkerLogger } from "./logger.js";
 import type { BuyerProfileAdapter } from "./ports.js";
@@ -9,13 +13,26 @@ const MAX_ATTEMPTS_PER_TENDER = 2;
 const RECOVERY_BLOCKING_REASONS = new Set([
   "AW_AUTHENTICATION_REJECTED",
   "CAPTCHA_UNSOLVED",
+  "PORTAL_AUTHENTICATION_REJECTED",
+  "PORTAL_DISCOVERY_BLOCKED",
   "PROFILE_LINK_NOT_FINAL",
   "RETRY_CAP_REACHED",
 ]);
 
 export interface RecoveryDependencies {
   awAdapter: BuyerProfileAdapter;
+  placeAdapter?: BuyerProfileAdapter;
+  maximilienAdapter?: BuyerProfileAdapter;
   logger?: WorkerLogger;
+}
+
+function adapterForRoute(
+  platform: "aw_solutions" | "place" | "maximilien",
+  dependencies: RecoveryDependencies,
+): BuyerProfileAdapter | undefined {
+  if (platform === "aw_solutions") return dependencies.awAdapter;
+  if (platform === "place") return dependencies.placeAdapter;
+  return dependencies.maximilienAdapter;
 }
 
 function baseReport(
@@ -87,23 +104,20 @@ export async function runRecovery(
     });
   }
 
-  if (route.disposition === "publication_only") {
+  if (route.disposition !== "adapter") {
     return finish({
       ...baseReport(request, config, route.platform, 0),
-      status: "publication_only",
+      status:
+        route.disposition === "publication_only"
+          ? "publication_only"
+          : "recovery_blocked",
       reasonCode: route.reasonCode,
     });
   }
 
-  if (route.disposition === "blocked") {
-    return finish({
-      ...baseReport(request, config, route.platform, 0),
-      status: "recovery_blocked",
-      reasonCode: route.reasonCode,
-    });
-  }
-
-  if (config.provider === "real" && config.missingRealSecrets.length > 0) {
+  if (
+    missingRealSecretsForPlatform(config, route.platform).length > 0
+  ) {
     return finish({
       ...baseReport(request, config, route.platform, 0),
       status: "recovery_blocked",
@@ -111,9 +125,18 @@ export async function runRecovery(
     });
   }
 
+  const adapter = adapterForRoute(route.platform, dependencies);
+  if (!adapter) {
+    return finish({
+      ...baseReport(request, config, route.platform, 0),
+      status: "recovery_blocked",
+      reasonCode: "PORTAL_DISCOVERY_BLOCKED",
+    });
+  }
+
   for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_TENDER; attempt += 1) {
     try {
-      const discovery = await dependencies.awAdapter.discover(request);
+      const discovery = await adapter.discover(request);
       return finish({
         ...baseReport(request, config, route.platform, attempt),
         status: "manifest_ready",
@@ -121,9 +144,15 @@ export async function runRecovery(
       });
     } catch (error) {
       const adapterError =
-        error instanceof AwAdapterError
+        error instanceof AwAdapterError || error instanceof PortalAdapterError
           ? error
-          : new AwAdapterError("ADAPTER_FAILURE", false, "Adapter failure");
+          : route.platform === "aw_solutions"
+            ? new AwAdapterError("ADAPTER_FAILURE", false, "Adapter failure")
+            : new PortalAdapterError(
+                "PORTAL_DISCOVERY_BLOCKED",
+                true,
+                "Portal adapter failure",
+              );
       if (adapterError.retryable && attempt < MAX_ATTEMPTS_PER_TENDER) {
         continue;
       }

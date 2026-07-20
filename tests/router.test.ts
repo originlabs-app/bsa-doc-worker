@@ -20,20 +20,30 @@ describe("routePortal", () => {
     });
   });
 
-  it("keeps PLACE blocked until its v2 adapter is validated", () => {
+  it("routes PLACE to its dedicated adapter", () => {
     expect(
       routePortal("https://www.marches-publics.gouv.fr/consultation/123"),
-    ).toEqual({
-      platform: "place",
-      disposition: "blocked",
-      reasonCode: "PLACE_V2_PENDING_VALIDATION",
+    ).toEqual({ platform: "place", disposition: "adapter" });
+  });
+
+  it("routes Maximilien to its dedicated adapter", () => {
+    expect(
+      routePortal("https://marches.maximilien.fr/consultation/456"),
+    ).toEqual({ platform: "maximilien", disposition: "adapter" });
+  });
+
+  it("classifies TED as a publication-only source", () => {
+    expect(routePortal("https://ted.europa.eu/notice/0001")).toEqual({
+      platform: "ted",
+      disposition: "publication_only",
+      reasonCode: "TED_PUBLICATION_ONLY",
     });
   });
 
   it.each([
-    "https://ted.europa.eu/notice/0001",
     "https://acheteur.example.test/consultation/123",
     "https://marches-publics.info.attacker.test/consultation/123",
+    "https://marches.maximilien.fr.attacker.test/consultation/123",
   ])("blocks unsupported or deceptive host %s", (url) => {
     expect(routePortal(url)).toEqual({
       platform: "unsupported",
