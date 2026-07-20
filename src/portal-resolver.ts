@@ -19,16 +19,25 @@ export type PortalSearchOutcome =
 
 const NON_DISTINCTIVE_TERMS = new Set([
   "batiments",
+  "centre",
+  "construction",
   "controles",
   "equipements",
   "extension",
   "groupe",
+  "musee",
+  "nouveau",
   "patrimoniale",
+  "principal",
   "pour",
   "reglementaires",
   "renovation",
+  "rempart",
+  "rue",
+  "secours",
   "scolaire",
   "travaux",
+  "strasbourg",
 ]);
 
 const MAX_SEARCH_RESPONSE_BYTES = 5 * 1024 * 1024;
@@ -189,7 +198,8 @@ async function expandPlaceResults(
 }
 
 export function buildDistinctiveQuery(title: string): string {
-  const tokens = title.match(/[\p{L}\p{N}]+/gu) ?? [];
+  const tokens =
+    title.match(/[\p{L}\p{N}]+(?:-[\p{L}\p{N}]+)*/gu) ?? [];
   const candidates = tokens
     .map((token, index) => ({ token, index, normalized: normalize(token) }))
     .filter(({ normalized }) => normalized.length >= 5)

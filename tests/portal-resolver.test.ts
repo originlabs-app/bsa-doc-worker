@@ -21,6 +21,22 @@ describe("buildDistinctiveQuery", () => {
       ),
     ).toBe("Erckmann");
   });
+
+  it("keeps named places distinctive in full sweep titles", () => {
+    expect(
+      buildDistinctiveQuery(
+        "Travaux de rénovation patrimoniale du Bastion XV, Rue du Rempart à Strasbourg",
+      ),
+    ).toBe("Bastion");
+    expect(
+      buildDistinctiveQuery(
+        "Construction du nouveau Centre de Secours Principal de Béziers",
+      ),
+    ).toBe("Béziers");
+    expect(buildDistinctiveQuery("Construction du musée de Saint-Gilles")).toBe(
+      "Saint-Gilles",
+    );
+  });
 });
 
 describe("parseAwPublicSearch", () => {
