@@ -88,3 +88,47 @@
 - Gates finaux : lint, typecheck, 53 tests, build et audit npm verts ; gitleaks
   ne détecte aucun secret dans le diff.
 - Rapport : `reports/sweep-dry-run-20260720.md`.
+
+## 2026-07-20 — READER porté et gelé localement
+
+- Mission : remplacer le `document-extractor` Vercel par un module READER
+  long-running dans ce repo, en portant sa mécanique éprouvée puis en remplaçant
+  uniquement le parsing OpenRouter manuel par Vercel AI SDK `generateObject` +
+  schémas Zod par rôle.
+- Sources lues sans modification : worker historique local
+  `BSA_COPILOT_PRODUCTION-lots-guardrails-v4/agents/document-extractor`, contrat
+  RPC et ledger de `BSA_COPILOT_PRODUCTION`, `memory.md` et story VC-1207.
+- Implémentation : rôles `rc|avis|ccap|ae|cctp|dpgf|bpu|dqe|inconnu`, modèle
+  `OPENROUTER_MODEL_EXTRACT` (défaut `google/gemini-3.5-flash`), retries SDK +
+  réparation structurée bornée, erreurs invalides/provider typées, coûts
+  agrégés et ledger `dce_extraction` uniquement en apply.
+- Pipeline : claim owner-fenced, heartbeat périodique, téléchargement Supabase
+  ou Nukema streamé sur disque, PDF texte/scanné, DOC/DOCX, tableurs, ZIP lazy
+  borné et ZIP imbriqué à profondeur 1, materialisation des enfants, puis
+  complete/fail/defer/release selon le contrat existant.
+- Modes : `off` par défaut et sans client externe ; `dry_run` fait un tick puis
+  release sans complete/fail/defer/upload/upsert/ledger ; `apply` est une boucle
+  long-running et reste interdit opérationnellement avant GO Pierre.
+- Sûreté : aucune connexion Supabase/Nukema/OpenRouter réelle, aucune donnée
+  production, aucun push/deploy/GitHub/Railway. Les trois fixtures JSON non
+  suivies déjà présentes dans le worktree ont été laissées intactes et hors
+  commits.
+- Fichiers code ajoutés : `src/llm/document-reader.ts`,
+  `src/llm/document-schemas.ts`, et `src/reader/{archive,classification,cli,config,download,nukema,pdf-subset,pipeline,readers,service,source,storage,supabase,types}.ts`.
+- Fichiers tests ajoutés : `tests/llm-document-reader.test.ts` et
+  `tests/reader-{cli,config,contract,files,pipeline,service,source}.test.ts`.
+- Documentation/config : `README.md`, `.env.example`, `memory.md`,
+  `package.json`, `package-lock.json`.
+- Commits fonctionnels `[skip ci]` : `8edf264`, `1b86224`, `4f65a3f`,
+  `486f507`, `3dd7f5a` ; le commit de checkpoint final suit cette entrée.
+- Gates Node 22 exécutés en avant-plan après la dernière correction code :
+  tests READER ciblés 54/54, suite complète 107/107 (dont les 53 RECOVERY),
+  lint vert, typecheck vert, build vert, smoke `READER_MODE=off npm start` vert,
+  `npm audit --audit-level=high` = 0 vulnérabilité, gitleaks = 0 fuite sur 19
+  commits.
+- Écarts assumés : aucune recette staging/réelle ni preuve des 546, car la
+  mission interdit toute connexion pendant le développement et réserve la
+  recette/bascule à l'orchestrateur ; aucun service Railway ni credential n'a
+  été créé. Le coût utilisé est le coût réel retourné dans les metadata
+  OpenRouter, agrégé entre retries, pas une estimation locale par token.
+- Statut : `READY_FOR_ORCHESTRATOR_REVIEW`; READER reste OFF.
