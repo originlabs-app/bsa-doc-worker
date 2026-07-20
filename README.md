@@ -1,13 +1,17 @@
 # BSA DCE Recovery Worker
 
 External, fail-closed Node.js worker for recovering DCE manifests from buyer
-profile links supplied by Nukema. The MVP lets the team develop and verify the
-AW Solutions path from sanitized fixtures without secrets, deployment or BSA
-production writes.
+profile links supplied by Nukema. AW Solutions, PLACE and Maximilien share one
+safe adapter contract and can be verified from sanitized fixtures without
+secrets, deployment or BSA production writes.
 
-Status: local MVP only. The corrected authenticated dry-run is recorded in
-`reports/recette-reelle-dry-run-20260720-login-fix.md`. No GitHub repository, Railway
-service, object-storage sink or BSA import is configured.
+Status: local implementation only. The corrected authenticated AW dry-run is
+recorded in `reports/recette-reelle-dry-run-20260720-login-fix.md`. No GitHub
+repository, Railway service, object-storage sink or BSA import is configured.
+
+PLACE and Maximilien are deterministic and mock-tested, but their real portal
+selectors/login/manifests have not been recetted. That recipe remains an
+orchestrator step after an explicit GO.
 
 The 24-AO recovery-rate sweep is recorded in
 `reports/sweep-dry-run-20260720.md`.
@@ -20,10 +24,10 @@ Nukema, Railway or any production environment.
 ## Architecture
 
 ```text
-Nukema URL -> final URL? -> AW Browserless session -> safe manifest
-           \-> generic URL -> public exact-match search on AWS + PLACE
-           \-> DILA/BOAMP -> publication_only
-           \-> PLACE manifest/TED/unknown -> recovery_blocked
+Nukema URL -> AW / PLACE / Maximilien route
+           -> portal-specific Browserless session -> safe manifest
+           \-> DILA / BOAMP / TED -> publication_only
+           \-> every other host -> recovery_blocked
 
 safe manifest -> dry_run JSON report (no download, no write)
 ephemeral links -> guarded HTTP stream -> quarantine sink (library only)
@@ -32,7 +36,7 @@ apply -> APPLY_NOT_AUTHORIZED before Browserless or storage
 
 Browserless is used only for the short browser phase that solves the CAPTCHA,
 selects lots and reveals attachment links. The browser closes before any large
-transfer. Signed links and AWS session material remain in memory and never
+transfer. Signed links and portal session material remain in memory and never
 appear in the safe manifest.
 
 ## Requirements and setup
@@ -60,7 +64,7 @@ No secret is required for installation, tests, build or mock operation.
 
 Providers:
 
-- `mock` is the default and uses sanitized in-code AW responses.
+- `mock` is the default and uses sanitized AW, PLACE and Maximilien responses.
 - `real` constructs the bounded Browserless/Playwright session. Missing
   secrets return `MISSING_REAL_SECRETS`; they never crash the process.
 
@@ -92,9 +96,10 @@ The input is JSON Lines, one validated job per line:
 `sourceField` accepts `link_to_buyer_profile` or `url_consultation`.
 `requestedLots` defaults to `{ "kind": "all" }`; explicit lots use
 `{ "kind": "ids", "ids": ["..."] }`. The worker CLI still expects a final
-`providedUrl`. The public resolver module handles strict title-prefix lookup on
-AWSolutions and PLACE for operator recipes; it does not follow third-party
-profiles returned by either index.
+`providedUrl`. A portal session may search only inside its own allowlisted
+domain and accepts one exact reference match, or one strict title-prefix plus
+buyer match. The legacy public resolver remains limited to AWSolutions and
+PLACE and never follows a third-party profile returned by either index.
 
 Exit codes:
 
@@ -105,12 +110,15 @@ Exit codes:
 ## Platform behavior
 
 - `*.marches-publics.info`: AW Solutions adapter.
+- `*.marches-publics.gouv.fr`: PLACE adapter.
+- `*.marches.maximilien.fr`: Maximilien adapter.
 - `*.dila.gouv.fr` and `*.boamp.fr`: `publication_only`; DILA is not a buyer
   profile.
-- `*.marches-publics.gouv.fr`: public equivalence search is available, but
-  manifest recovery remains `PLACE_V2_PENDING_VALIDATION`; AWS selectors are
-  never reused for PLACE.
-- TED and all other hosts: `UNSUPPORTED_PORTAL`.
+- `*.ted.europa.eu`: `publication_only`; TED is not a buyer profile.
+- all other hosts: `UNSUPPORTED_PORTAL`.
+
+PLACE and Maximilien have separate session wrappers and mock fixtures; AW
+selectors and credentials are never reused for either portal.
 
 At most two sequential discovery attempts are made per tender. Retryable
 CAPTCHA/browser failures stop with `RETRY_CAP_REACHED`; routing, missing-secret
@@ -125,6 +133,10 @@ These values belong only in the worker secret manager or an ignored local
 BROWSERLESS_TOKEN=""
 AW_PORTAL_EMAIL=""
 AW_PORTAL_PASSWORD=""
+PLACE_PORTAL_EMAIL=""
+PLACE_PORTAL_PASSWORD=""
+MAXIMILIEN_PORTAL_EMAIL=""
+MAXIMILIEN_PORTAL_PASSWORD=""
 ```
 
 The repository intentionally does not auto-load `.env`. Use the explicit
@@ -139,8 +151,9 @@ npm run worker -- \
   --input jobs.jsonl
 ```
 
-In a secret manager, inject the three variables directly. The AW login waits
-for APR's asynchronous Keycloak redirect, fills the real `username` and
+In a secret manager, inject only the variables required by each routed portal,
+plus `BROWSERLESS_TOKEN`. The AW login waits for APR's asynchronous Keycloak
+redirect, fills the real `username` and
 `password` controls, submits the original form so its hidden state is kept,
 and does not reselect `BSA PARTNERS` when it is already the current entity.
 
@@ -148,14 +161,23 @@ The 2026-07-20 recipe contacted only the
 two authorized public indexes and Browserless/AW authentication surfaces; it
 performed no persistent download or BSA write.
 
+For a real `dry_run` batch with complete portal secrets, the CLI reads the
+official Browserless account usage immediately before and after discovery. It
+logs the exact account-level unit delta for the batch, never an estimated
+per-AO allocation. A missing/invalid usage snapshot, counter regression or
+billing-period change makes the batch exit with code `2`; the token and usage
+endpoint are never logged. Mock, `off`, `apply`, publication-only and
+missing-secret requests do not invoke the usage API.
+
 ## Download and storage safety
 
 `streamAttachment(...)` is a library boundary for the future authorized apply
 path; the CLI does not call it today. It:
 
-- accepts only HTTPS AW attachment or same-host `dce.TDoc` URLs;
-- revalidates every redirect and never forwards AWS cookies to
-  `downloads.awsolutions.fr`;
+- accepts only HTTPS attachment URLs matching the source adapter's AW, PLACE or
+  Maximilien host/path allowlist;
+- revalidates every redirect, rejects cross-portal URLs and never forwards
+  cookies across hosts;
 - streams directly into an injected quarantine writer;
 - rejects HTTP errors, empty bodies, HTML/login/CAPTCHA content, bad PDF/ZIP
   magic bytes, size mismatches and responses over 100 MiB;

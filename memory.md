@@ -4,10 +4,13 @@
 
 - The worker is a separate Node.js repository, never an Edge Function and never
   part of `BSA_COPILOT_PRODUCTION`.
-- The manifest adapter supports AW Solutions only. When a Nukema buyer-profile
-  URL is generic or inaccessible, public equivalence lookup is authorized by
-  title/reference on AWSolutions and PLACE only. PLACE manifest recovery still
-  returns `recovery_blocked`; TED and third-party profiles are unsupported.
+- Superseded 2026-07-20: the initial AW-only adapter scope and blocked PLACE
+  manifest assumption no longer apply.
+- Source of truth 2026-07-20: manifest recovery adapters are allowlisted for AW
+  Solutions, PLACE and Maximilien. A fallback search accepts only a unique
+  exact reference, or a strict title prefix plus buyer, on the adapter's own
+  domain. DILA/BOAMP and TED stay publication-only; all other buyer profiles
+  stay unsupported.
 - Browserless is limited to manifest discovery. Attachment transfers are
   direct HTTP streams to durable object storage.
 - RECOVERY modes are `off`, `dry_run`, and `apply`; default is `off`. Its
@@ -29,6 +32,10 @@
   The earlier rejection was a worker-flow defect: APR redirects to Keycloak
   asynchronously, the field is named `username`, and Node dotenv parsing can
   truncate an unquoted secret containing `#`. No credential value is stored.
-- Authorized buyer-profile allowlist remains AWSolutions and PLACE only.
-  `plateforme.alsacemarchespublics.eu` must not be opened until Pierre gives an
-  explicit portal-specific GO.
+- Authorized buyer-profile adapter allowlist is AW Solutions, PLACE and
+  Maximilien. `plateforme.alsacemarchespublics.eu` must not be opened until
+  Pierre gives an explicit portal-specific GO.
+- PLACE and Maximilien credentials are worker secrets referenced only by their
+  environment variable names. Their real login/manifest recipe is not proven
+  by the implementation lot and remains reserved to the orchestrator after GO;
+  local development proof uses sanitized mocks only.
