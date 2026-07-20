@@ -132,3 +132,34 @@
   été créé. Le coût utilisé est le coût réel retourné dans les metadata
   OpenRouter, agrégé entre retries, pas une estimation locale par token.
 - Statut : `READY_FOR_ORCHESTRATOR_REVIEW`; READER reste OFF.
+
+## 2026-07-20 — Adaptateurs PLACE + Maximilien gelés localement
+
+- Lot développé dans le worktree dédié
+  `BSA_DCE_RECOVERY_WORKER-adapters-place-maximilien`, branche
+  `feat/adapters-place-maximilien`, depuis `origin/main` au commit `827eba8`.
+- Ajout de deux adaptateurs sur le contrat AW existant : sessions Playwright
+  bornées, login, résolution exacte de consultation, sélection des lots,
+  manifeste sûr, mocks et fixtures séparés pour PLACE et Maximilien.
+- Routage gelé : AW, PLACE et Maximilien vers leurs adaptateurs ; DILA/BOAMP et
+  TED en `publication_only` ; autres domaines en `recovery_blocked`.
+- Sûreté : `off` reste le défaut, `apply` reste bloqué, deux tentatives maximum,
+  CAPTCHA/auth/erreur deviennent des échecs typés, aucune URL signée ni secret
+  dans les rapports ou logs.
+- Browserless est limité à la découverte du manifeste. Les contrôles pouvant
+  télécharger une pièce sont refusés dans la session navigateur ; le transfert
+  futur reste un stream HTTP avec host/path et redirections revalidés.
+- Le CLI réel mesure l'usage officiel Browserless avant/après le lot et
+  journalise uniquement le delta de compte. Une mesure indisponible ou
+  incohérente bloque le lot ; aucune allocation estimée par AO.
+- Preuves finales Node 22, toutes exécutées en avant-plan : RECOVERY 85/85
+  (incluant les 53 tests historiques), READER 54/54 inchangés, suite complète
+  139/139, lint vert, typecheck vert, build vert, `npm audit` = 0 vulnérabilité,
+  gitleaks = aucune fuite sur 28 commits, `git diff --check` vert.
+- Commits fonctionnels `[skip ci]` : `bc288eb`, `e259129`, `f4fe5b9`,
+  `6454036`, `aa8c594`, `6112252`, `6a6a419`; le commit de checkpoint final
+  porte le gel.
+- Aucune recette réelle PLACE/Maximilien, aucun credential utilisé, aucun
+  téléchargement persistant, écriture BSA/prod, push, merge, deploy, GitHub ou
+  Railway. La recette réelle reste à l'orchestrateur après GO.
+- Statut : `READY_FOR_ORCHESTRATOR_REVIEW`; RECOVERY et READER restent OFF.
