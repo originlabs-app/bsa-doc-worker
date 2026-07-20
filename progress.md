@@ -163,3 +163,39 @@
   téléchargement persistant, écriture BSA/prod, push, merge, deploy, GitHub ou
   Railway. La recette réelle reste à l'orchestrateur après GO.
 - Statut : `READY_FOR_ORCHESTRATOR_REVIEW`; RECOVERY et READER restent OFF.
+
+## 2026-07-20 — ADAPTERS-FIX : les 2 blocages du sweep nocturne corrigés
+
+- Ce que ça change : les 6 AO dont le DCE est en périmètre (5 AW + 1
+  Maximilien) ne sont plus bloqués par l'adaptateur. Les pièces PLACE et
+  Maximilien exposées en query-string Atexo sont maintenant reconnues (plus de
+  manifeste faux-positif « Signer un document »), et le mur AW `choixDCE`
+  est franchi par l'identification Keycloak déjà prouvée, avec un budget
+  CAPTCHA borné.
+- FIX A (commit `4afd7b1`) : `isAttachmentUrl`/`isPortalAttachmentUrl`
+  reconnaissent les actions Atexo `page=Entreprise.EntrepriseDemandeTelechargementDce`
+  et `EntrepriseDownloadReglement` (module partagé `src/adapters/atexo.ts`) ;
+  les liens d'action non-pièce (« Signer un document ») sont exclus du
+  manifeste ; `isSafeManifestControlTarget` ne clique plus un lien de
+  téléchargement Atexo comme contrôle de révélation (la session reste sur la
+  page qui liste les pièces — cause racine du témoin PLACE 3040234) ;
+  identité stable des pièces Atexo via action+id de la query. Fixtures neuves
+  calquées sur Maximilien 942952 et le témoin PLACE.
+- FIX B (commit `f70ed87`) : sur `dematEnt.choixDCE`, clic du lien « VOUS
+  DEVEZ VOUS IDENTIFIER » puis login Keycloak existant inchangé ; choix
+  « DCE complet » géré (lots `all`), formulaire de lots sauté uniquement si
+  le parcours DCE complet l'a remplacé ; `AwCaptchaSolveBudget` finance au
+  plus une résolution Browserless (10 unités) par tentative, au-delà échec
+  `CAPTCHA_UNSOLVED` retryable, et le cap worker de 2 tentatives termine en
+  `recovery_blocked` honnête (`RETRY_CAP_REACHED`).
+- Périmètre respecté : READER et ANALYZE intacts, aucun credential utilisé,
+  lot 100 % mocks/fixtures, pas de recette réelle (réservée à
+  l'orchestrateur), pas de push.
+- Gates avant-plan : suite complète 158/158 (139 existants + 19 nouveaux,
+  zéro régression), lint vert, typecheck vert, build vert,
+  `npm audit --audit-level=high` = 0 vulnérabilité, gitleaks = 0 fuite sur
+  41 commits, `git diff --check` vert, smoke mock dry-run `manifest_ready`
+  3 pièces sans écriture.
+- Corpus réel futur (recette orchestrateur) : AW IDM 1848852 / 1849180 /
+  1848459 / 1840818 / 1846761 et Maximilien 942952.
+- Statut : ADAPTERS-FIX GELÉ, prêt pour recette réelle orchestrateur.
