@@ -149,13 +149,13 @@ describe("runAnalyzeService", () => {
     expect(sink.write).not.toHaveBeenCalled();
   });
 
-  it("analyzes and logs in dry_run with zero write", async () => {
+  it("analyzes and logs in shadow with zero write", async () => {
     const sink: AnalysisResultSink = { write: vi.fn() };
     const recordLearningUsage = vi.fn();
     const logger = { info: vi.fn() };
 
     const report = await runAnalyzeService({
-      config: config("dry_run"),
+      config: config("shadow"),
       dossier,
       client: client(),
       recallLearning: vi.fn().mockResolvedValue(learning),
@@ -166,7 +166,7 @@ describe("runAnalyzeService", () => {
     });
 
     expect(report).toMatchObject({
-      mode: "dry_run",
+      mode: "shadow",
       status: "analyzed",
       result: {
         score: 100,
@@ -196,7 +196,7 @@ describe("runAnalyzeService", () => {
     expect(sink.write).not.toHaveBeenCalled();
     expect(recordLearningUsage).not.toHaveBeenCalled();
     expect(logger.info).toHaveBeenCalledWith(
-      "analyze_dry_run_result",
+      "analyze_shadow_result",
       expect.objectContaining({ tender_id: "tender-1", score: 100 }),
     );
   });

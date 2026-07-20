@@ -170,3 +170,45 @@
   aucun finding bloquant restant sur correction, lisibilité, architecture,
   sécurité ou performance.
 - Statut : `READY_FOR_ORCHESTRATOR_REVIEW`; `ANALYZE_MODE` reste `off`.
+
+## 2026-07-20 — ANALYZE câblé en shadow one-shot, lecture seule
+
+- Mission : câbler le module ANALYZE à la file existante sans modifier
+  RECOVERY, READER ni le cœur agent/domain/scoring/redhibitory, et sans couper
+  l'edge historique `analyze-dce`.
+- Base et isolation : branche `feat/analyze-wiring`, worktree dédié, base exacte
+  `origin/main@deb8adad4ba186dd5165bd8c50fa145212af2c53`.
+- Contrats DB relus uniquement contre Supabase local via
+  `pg_get_functiondef` : `claim_dce_analysis_queue_row`,
+  `list_tender_analysis_documents`, `sync_tender_lot_analysis` et
+  `record_ai_spend`. Aucune connexion production.
+- Modes : `off` par défaut et sans construction de client ; `shadow` observe au
+  plus dix lignes puis analyse un seul dossier sans claim/acquittement/update/
+  ledger/comptage d'usage ; `apply` est préparé derrière une capacité distincte
+  mais reste interdit jusqu'au GO explicite de Pierre.
+- Assemblage : tender + profil entreprise + qualifications + pièces de
+  `list_tender_analysis_documents`, lecture des textes privés READER, rôles et
+  lots conservés, refus des extractions non terminales, limites de 100 pièces et
+  1 000 000 caractères.
+- Shadow : résultat riche journalisé par lot sans texte brut ni extrait de
+  citation, rappel des leçons actif, score existant relu après analyse et delta
+  tracé avec `learning_applied`, `lessons_count` et `rules_count`.
+- One-shot : nouvelle CLI `analyze` / `analyze:start`, une passe puis exit ; le
+  script Railway `start` du READER reste inchangé. Un shadow répété peut revoir
+  la même ligne, conséquence volontaire de la lecture seule stricte.
+- Apply préparé : claim RPC exact, update tender protégé, synchronisation des
+  seuls lots enfants déjà existants pour un parent marché, ledger existant,
+  aucune création de lot et aucune transition GO/NO-GO/rejet.
+- Tests mockés : off sans dépendances, one-shot, claim puis assemblage,
+  extraction non prête, couverture partielle terminale, texte manquant, marché
+  alloti, comparaison shadow, zéro écriture vérifiée au niveau du client,
+  contrats apply et erreurs externes assainies.
+- Commits fonctionnels `[skip ci]` : `8559112`, `aabe38b`, `cd4bc7a`,
+  `e60f155`, `84a2ea3` ; le commit de checkpoint final suit cette entrée.
+- Gates Node 22 exécutés au premier plan : suite complète 150/150 (27 fichiers),
+  lint, typecheck et build verts ; `npm audit --audit-level=high` = 0
+  vulnérabilité ; gitleaks 8.30.1 = 0 fuite sur les cinq commits fonctionnels.
+- Sûreté : aucun appel réel OpenRouter, aucune donnée/écriture production, aucun
+  push, merge, deploy, GitHub ou Railway. `ANALYZE_MODE` reste `off`.
+- Revue finale qualité/sécurité : aucun finding bloquant restant.
+- Statut : `READY_FOR_ORCHESTRATOR_REVIEW`.

@@ -13,6 +13,8 @@
     "test": "vitest",
     "test:ci": "vitest run",
     "typecheck": "tsc --noEmit",
+    "analyze": "tsx src/analyze/cli.ts",
+    "analyze:start": "node dist/analyze/cli.js",
     "worker": "tsx src/cli.ts",
     "reader": "tsx src/reader/cli.ts",
     "reader:start": "node dist/reader/cli.js"
