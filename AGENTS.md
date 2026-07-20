@@ -1,0 +1,45 @@
+# BSA DCE Recovery Worker
+
+External Node.js worker for recovering DCE manifests from buyer-profile links.
+
+Surface livraison: `prod-sensitive`. Production imports, database/storage
+writes, deploys and secret writes require Pierre's explicit authorization.
+
+## Scope
+
+- Keep every buyer-profile recovery implementation in this repository, never
+  in `BSA_COPILOT_PRODUCTION`.
+- MVP platform: AW Solutions / `marches-publics.info` only.
+- PLACE is a typed placeholder returning `recovery_blocked` until v2.
+- DILA/BOAMP are publication-only sources, not buyer profiles.
+- Cross-portal equivalence search and TED are out of MVP scope.
+
+## Safety
+
+- Default recovery mode is `off`; `apply` remains fail-closed until authorized.
+- Never log or persist tokens, credentials, cookies, CAPTCHA values, signed
+  attachment URLs, `CFID` or `CFTOKEN`.
+- Browserless discovers attachment links only. Downloads use direct bounded
+  HTTP streaming to an injected object sink.
+- Scrape only the exact consultation URL supplied by Nukema. Enforce host
+  allowlists and at most two attempts per tender.
+- `.env` is local and ignored. Commit only empty variable names in
+  `.env.example`.
+
+## Commands
+
+```sh
+npm run lint
+npm run typecheck
+npm run test:ci
+npm run build
+```
+
+Run the mock dry-run fixture:
+
+```sh
+npm run worker -- --mode dry_run --provider mock --input tests/fixtures/jobs.jsonl
+```
+
+Keep all gates in the foreground. Do not create a GitHub repository, configure
+Railway, deploy, or perform a real portal recipe in the MVP implementation lot.
