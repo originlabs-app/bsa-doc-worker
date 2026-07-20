@@ -5,15 +5,17 @@ profile links supplied by Nukema. The MVP lets the team develop and verify the
 AW Solutions path from sanitized fixtures without secrets, deployment or BSA
 production writes.
 
-Status: local MVP only. No GitHub repository, Railway service, real portal
-recipe, object-storage sink or BSA import is configured.
+Status: local MVP only. A strict real dry-run was completed on 2026-07-20; see
+`reports/recette-reelle-dry-run-20260720.md`. No GitHub repository, Railway
+service, object-storage sink or BSA import is configured.
 
 ## Architecture
 
 ```text
-Nukema URL -> portal router -> AW Browserless session -> safe manifest
-                         \-> DILA/BOAMP -> publication_only
-                         \-> PLACE/TED/unknown -> recovery_blocked
+Nukema URL -> final URL? -> AW Browserless session -> safe manifest
+           \-> generic URL -> public exact-match search on AWS + PLACE
+           \-> DILA/BOAMP -> publication_only
+           \-> PLACE manifest/TED/unknown -> recovery_blocked
 
 safe manifest -> dry_run JSON report (no download, no write)
 ephemeral links -> guarded HTTP stream -> quarantine sink (library only)
@@ -81,9 +83,10 @@ The input is JSON Lines, one validated job per line:
 
 `sourceField` accepts `link_to_buyer_profile` or `url_consultation`.
 `requestedLots` defaults to `{ "kind": "all" }`; explicit lots use
-`{ "kind": "ids", "ids": ["..."] }`. Optional `searchHints` are reserved
-for a future cross-portal resolver and are ignored by the MVP. The MVP always
-uses the exact `providedUrl`; it never searches another portal.
+`{ "kind": "ids", "ids": ["..."] }`. The worker CLI still expects a final
+`providedUrl`. The public resolver module handles strict title-prefix lookup on
+AWSolutions and PLACE for operator recipes; it does not follow third-party
+profiles returned by either index.
 
 Exit codes:
 
@@ -96,7 +99,8 @@ Exit codes:
 - `*.marches-publics.info`: AW Solutions adapter.
 - `*.dila.gouv.fr` and `*.boamp.fr`: `publication_only`; DILA is not a buyer
   profile.
-- `*.marches-publics.gouv.fr`: `PLACE_V2_PENDING_VALIDATION`; AWS selectors are
+- `*.marches-publics.gouv.fr`: public equivalence search is available, but
+  manifest recovery remains `PLACE_V2_PENDING_VALIDATION`; AWS selectors are
   never reused for PLACE.
 - TED and all other hosts: `UNSUPPORTED_PORTAL`.
 
@@ -116,8 +120,9 @@ AW_PORTAL_PASSWORD=
 ```
 
 The repository intentionally does not auto-load `.env`. Export the variables
-through the execution environment. The first real dry-run is a separate
-orchestrator/Pierre recipe gate; this MVP lot did not contact the portal.
+through the execution environment. The 2026-07-20 recipe contacted only the
+two authorized public indexes and Browserless/AW authentication surfaces; it
+performed no persistent download or BSA write.
 
 ## Download and storage safety
 

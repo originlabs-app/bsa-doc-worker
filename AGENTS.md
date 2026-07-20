@@ -9,10 +9,11 @@ writes, deploys and secret writes require Pierre's explicit authorization.
 
 - Keep every buyer-profile recovery implementation in this repository, never
   in `BSA_COPILOT_PRODUCTION`.
-- MVP platform: AW Solutions / `marches-publics.info` only.
-- PLACE is a typed placeholder returning `recovery_blocked` until v2.
+- MVP manifest adapter: AW Solutions / `marches-publics.info` only.
+- Public equivalence lookup may search AWSolutions and PLACE by title/reference;
+  the PLACE manifest adapter remains blocked until its v2 validation.
 - DILA/BOAMP are publication-only sources, not buyer profiles.
-- Cross-portal equivalence search and TED are out of MVP scope.
+- TED and all third-party buyer profiles remain out of scope.
 
 ## Safety
 
@@ -21,8 +22,10 @@ writes, deploys and secret writes require Pierre's explicit authorization.
   attachment URLs, `CFID` or `CFTOKEN`.
 - Browserless discovers attachment links only. Downloads use direct bounded
   HTTP streaming to an injected object sink.
-- Scrape only the exact consultation URL supplied by Nukema. Enforce host
-  allowlists and at most two attempts per tender.
+- Use the exact consultation URL supplied by Nukema when it is final. For a
+  generic or inaccessible URL, search for a strict title/reference equivalent
+  only on AWSolutions and PLACE. Enforce host allowlists and at most two portal
+  attempts per tender.
 - `.env` is local and ignored. Commit only empty variable names in
   `.env.example`.
 
