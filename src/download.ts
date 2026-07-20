@@ -3,6 +3,7 @@ import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 
+import type { AdapterPlatform } from "./contracts.js";
 import type {
   DocumentIngestionSink,
   DownloadReceipt,
@@ -35,8 +36,31 @@ function failDownload(): never {
   throw new DownloadError();
 }
 
-function isAllowedAttachmentUrl(url: URL): boolean {
+function isHostOrSubdomain(hostname: string, rootHost: string): boolean {
+  return hostname === rootHost || hostname.endsWith(`.${rootHost}`);
+}
+
+function isPortalAttachmentUrl(url: URL, rootHost: string): boolean {
+  return (
+    url.protocol === "https:" &&
+    isHostOrSubdomain(url.hostname, rootHost) &&
+    /(dce|document|pi[eè]ce|attachment|download|t[eé]l[eé]charg)/i.test(
+      url.pathname,
+    )
+  );
+}
+
+function isAllowedAttachmentUrl(
+  url: URL,
+  sourcePlatform: AdapterPlatform | undefined,
+): boolean {
   if (url.protocol !== "https:") return false;
+  if (sourcePlatform === "place") {
+    return isPortalAttachmentUrl(url, "marches-publics.gouv.fr");
+  }
+  if (sourcePlatform === "maximilien") {
+    return isPortalAttachmentUrl(url, "marches.maximilien.fr");
+  }
   if (
     url.hostname === "downloads.awsolutions.fr" &&
     url.pathname.startsWith("/dce/attachment/")
@@ -74,7 +98,9 @@ async function fetchAllowlisted(
   fetcher: Fetcher,
 ): Promise<Response> {
   const initialUrl = new URL(attachment.downloadUrl);
-  if (!isAllowedAttachmentUrl(initialUrl)) failDownload();
+  if (!isAllowedAttachmentUrl(initialUrl, attachment.sourcePlatform)) {
+    failDownload();
+  }
   let currentUrl = initialUrl;
 
   for (let redirect = 0; redirect <= MAX_REDIRECTS; redirect += 1) {
@@ -92,7 +118,9 @@ async function fetchAllowlisted(
     await response.body?.cancel();
     if (!location || redirect === MAX_REDIRECTS) failDownload();
     const nextUrl = new URL(location, currentUrl);
-    if (!isAllowedAttachmentUrl(nextUrl)) failDownload();
+    if (!isAllowedAttachmentUrl(nextUrl, attachment.sourcePlatform)) {
+      failDownload();
+    }
     currentUrl = nextUrl;
   }
 
