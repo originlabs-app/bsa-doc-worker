@@ -12,7 +12,9 @@
     "test": "vitest",
     "test:ci": "vitest run",
     "typecheck": "tsc --noEmit",
-    "worker": "tsx src/cli.ts"
+    "worker": "tsx src/cli.ts",
+    "reader": "tsx src/reader/cli.ts",
+    "reader:start": "node dist/reader/cli.js"
   },
   "dependencies": {
     "@openrouter/ai-sdk-provider": "3.0.0",

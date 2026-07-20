@@ -1,5 +1,13 @@
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
-import { generateObject, NoObjectGeneratedError } from "ai";
+import {
+  APICallError,
+  EmptyResponseBodyError,
+  generateObject,
+  InvalidResponseDataError,
+  JSONParseError,
+  NoObjectGeneratedError,
+  RetryError,
+} from "ai";
 import { z } from "zod";
 
 import {
@@ -49,6 +57,18 @@ export class ReaderLlmInvalidOutputError extends Error {
   ) {
     super("READER_LLM_INVALID_OUTPUT", options);
     this.name = "ReaderLlmInvalidOutputError";
+  }
+}
+
+export class ReaderLlmProviderError extends Error {
+  readonly code = "READER_LLM_PROVIDER_FAILED";
+
+  constructor(
+    public readonly costUsd: number,
+    options?: ErrorOptions,
+  ) {
+    super("READER_LLM_PROVIDER_FAILED", options);
+    this.name = "ReaderLlmProviderError";
   }
 }
 
@@ -142,6 +162,15 @@ Retourne uniquement le texte utile et le nombre de pages lues selon le schéma i
       } catch (error) {
         if (NoObjectGeneratedError.isInstance(error)) {
           throw new SdkStructuredOutputError(observedCost, { cause: error });
+        }
+        if (
+          RetryError.isInstance(error) ||
+          APICallError.isInstance(error) ||
+          JSONParseError.isInstance(error) ||
+          InvalidResponseDataError.isInstance(error) ||
+          EmptyResponseBodyError.isInstance(error)
+        ) {
+          throw new ReaderLlmProviderError(observedCost, { cause: error });
         }
         throw error;
       }
