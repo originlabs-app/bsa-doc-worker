@@ -12,6 +12,11 @@ service, object-storage sink or BSA import is configured.
 The 24-AO recovery-rate sweep is recorded in
 `reports/sweep-dry-run-20260720.md`.
 
+The repository now also contains the local-only READER replacement for the
+former Vercel `document-extractor`. It is implemented and tested, but remains
+disabled by default and has not been connected to Supabase, OpenRouter,
+Nukema, Railway or any production environment.
+
 ## Architecture
 
 ```text
@@ -172,3 +177,68 @@ identity and hash.
 
 Creating the GitHub repository, configuring Railway, adding secrets, running a
 real recipe and enabling production writes are separate ship decisions.
+
+## READER — document extraction queue
+
+READER ports the proven document/OCR/archive mechanics of the historical local
+`document-extractor` into this Node.js worker. It consumes the existing
+owner-fenced queue contract without changing its RPC payloads:
+
+```text
+claim -> heartbeat -> streamed download -> PDF/OCR/ZIP read
+      -> typed LLM read -> complete
+      \-> typed failure -> fail/defer/release
+```
+
+PDF reads use Vercel AI SDK `generateObject`, the OpenRouter provider and a
+strict Zod schema. The supported roles are `rc`, `avis`, `ccap`, `ae`, `cctp`,
+`dpgf`, `bpu`, `dqe` and `inconnu`. Invalid model output is retried within a
+bounded SDK-backed flow, then becomes `READER_LLM_INVALID_OUTPUT`; there is no
+manual JSON parsing and no agent loop in this pipeline.
+
+Downloads are streamed to private temporary files. ZIP entries are traversed
+lazily with entry, inflated-size, total-size and nesting caps; a corrupt ZIP
+becomes the short typed issue `ZIP_CORRUPT`. The Railway entrypoint is a
+long-running process, not an HTTP or Vercel serverless handler:
+
+```sh
+npm run build
+READER_MODE=off npm start
+```
+
+READER modes are independent from `RECOVERY_MODE`:
+
+| `READER_MODE` | Behavior |
+| --- | --- |
+| `off` (default) | Exits without constructing external clients or claiming work. |
+| `dry_run` | Runs one bounded tick: claim, heartbeat, process, log the complete tick report, then release. It never completes/fails/defers, uploads, materializes ZIP children or writes the ledger. OpenRouter calls can still incur a provider cost, reported in logs. |
+| `apply` | Runs continuously, writes extraction output and one `dce_extraction` ledger row per billed logical PDF. Operationally forbidden until Pierre gives the rollout GO. |
+
+Required only for `dry_run` and `apply`:
+
+```dotenv
+SUPABASE_URL=""
+SUPABASE_SERVICE_ROLE_KEY=""
+OPENROUTER_API_KEY=""
+NUKEMA_USERNAME=""
+NUKEMA_PASSWORD=""
+```
+
+Optional controls:
+
+```dotenv
+OPENROUTER_MODEL_EXTRACT="google/gemini-3.5-flash"
+READER_BATCH="2"
+READER_MAX_BYTES="314572800"
+READER_MAX_MODEL_BYTES="20971520"
+READER_HEARTBEAT_MS="30000"
+READER_POLL_MS="5000"
+```
+
+The process rechecks `READER_MODE` between ticks and before apply-only writes;
+setting it to `off` and restarting/reloading the Railway service is the
+kill-switch. Logs are JSON lines and carry queue, tender, document, duration,
+cost, status and short issue fields; configured secrets and URLs are redacted.
+
+All READER tests use mocks or generated local fixtures. No development or gate
+command requires or authorizes a production connection.

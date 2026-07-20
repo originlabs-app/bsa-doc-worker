@@ -9,6 +9,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "lint": "eslint .",
+    "start": "node dist/reader/cli.js",
     "test": "vitest",
     "test:ci": "vitest run",
     "typecheck": "tsc --noEmit",

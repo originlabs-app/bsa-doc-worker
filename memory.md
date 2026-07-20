@@ -10,8 +10,17 @@
   returns `recovery_blocked`; TED and third-party profiles are unsupported.
 - Browserless is limited to manifest discovery. Attachment transfers are
   direct HTTP streams to durable object storage.
-- Modes are `off`, `dry_run`, and `apply`; default is `off`. `dry_run` performs
-  no writes and `apply` is not authorized in the MVP.
+- RECOVERY modes are `off`, `dry_run`, and `apply`; default is `off`. Its
+  `dry_run` performs no writes and its `apply` remains unauthorized in the MVP.
+- 2026-07-20 - Source of truth: READER ports the local historical
+  `agents/document-extractor` mechanics instead of reimplementing them. Its
+  deterministic LLM boundary is Vercel AI SDK `generateObject` + OpenRouter +
+  role-specific Zod schemas; agent loops are reserved for a later portal
+  exploration phase. `READER_MODE` defaults to `off`; `dry_run` may spend at
+  OpenRouter but performs only claim/heartbeat/release control writes, while
+  `apply` remains operationally forbidden until Pierre's explicit rollout GO.
+  Source: Pierre explicit instruction and VC-1207. Supersedes: the assumption
+  that READER should be built from scratch.
 - Development and tests must work from sanitized fixtures without secrets.
 - The 2026-07-20 real dry-run found two exact Strasbourg notices in the public
   AWSolutions index, but both DCEs route to `plateforme.alsacemarchespublics.eu`
