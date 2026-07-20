@@ -10,9 +10,9 @@ export interface PortalConsultationCandidate {
 }
 
 interface PortalResolutionHints {
-  reference?: string;
-  title?: string;
-  buyerName?: string;
+  reference?: string | undefined;
+  title?: string | undefined;
+  buyerName?: string | undefined;
 }
 
 export type PortalSearchOutcome =
