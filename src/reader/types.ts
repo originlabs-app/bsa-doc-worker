@@ -48,6 +48,8 @@ export interface ExtractionNote {
   depth?: number;
   reason?: string;
   magicHex?: string;
+  costUsd?: number;
+  attempts?: number;
 }
 
 export interface MaterializedZipChild {
