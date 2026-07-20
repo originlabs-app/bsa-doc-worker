@@ -35,12 +35,31 @@ export class AnalyzeStepBudgetError extends Error {
   }
 }
 
+export class AnalyzeTokenBudgetError extends Error {
+  readonly code = "ANALYZE_TOKEN_BUDGET_EXCEEDED";
+
+  constructor() {
+    super("ANALYZE_TOKEN_BUDGET_EXCEEDED");
+    this.name = "AnalyzeTokenBudgetError";
+  }
+}
+
+export class AnalyzeDraftGroundingError extends Error {
+  readonly code = "ANALYZE_DRAFT_NOT_GROUNDED";
+
+  constructor() {
+    super("ANALYZE_DRAFT_NOT_GROUNDED");
+    this.name = "AnalyzeDraftGroundingError";
+  }
+}
+
 export class SdkAnalyzeStructuredOutputError extends Error {
   readonly code = "SDK_ANALYZE_STRUCTURED_OUTPUT_INVALID";
 
   constructor(
     public readonly costUsd: number,
     public readonly usage: AnalyzeUsage,
+    public readonly stepsUsed: number,
     options?: ErrorOptions,
   ) {
     super("SDK_ANALYZE_STRUCTURED_OUTPUT_INVALID", options);
@@ -75,6 +94,41 @@ function assertConfig(config: { maxSteps: number; maxOutputTokens: number }): vo
   }
 }
 
+function assertDraftGrounded(
+  draft: DceAnalystResult["draft"],
+  dossier: AnalyzeDossierInput,
+): void {
+  const documentIds = new Set(dossier.documents.map((document) => document.id));
+  for (const unit of draft.units) {
+    const citedIds = [
+      ...unit.citations.map((citation) => citation.documentId),
+      ...unit.requiredQualifications.map((qualification) =>
+        qualification.sourceDocumentId
+      ),
+      ...(unit.socialInsertion?.sourceDocumentId
+        ? [unit.socialInsertion.sourceDocumentId]
+        : []),
+    ];
+    if (citedIds.some((documentId) => !documentIds.has(documentId))) {
+      throw new AnalyzeDraftGroundingError();
+    }
+  }
+
+  const explicitLotNumbers = new Set(dossier.documents.flatMap((document) =>
+    document.lotNumber ? [document.lotNumber] : []
+  ));
+  if (explicitLotNumbers.size === 0) return;
+  const analyzedLotNumbers = new Set(draft.units.flatMap((unit) =>
+    unit.unit.kind === "lot" ? [unit.unit.number] : []
+  ));
+  if (
+    draft.units.some((unit) => unit.unit.kind === "market") ||
+    [...explicitLotNumbers].some((number) => !analyzedLotNumbers.has(number))
+  ) {
+    throw new AnalyzeDraftGroundingError();
+  }
+}
+
 export async function runDceAnalyst(input: {
   dossier: AnalyzeDossierInput;
   learning: AnalyzeLearningSnapshot;
@@ -88,31 +142,53 @@ export async function runDceAnalyst(input: {
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= MAX_STRUCTURED_ATTEMPTS; attempt += 1) {
+    const remainingSteps = input.config.maxSteps - stepsUsed;
+    const remainingOutputTokens = input.config.maxOutputTokens - usage.outputTokens;
+    if (remainingSteps < 1) throw new AnalyzeStepBudgetError();
+    if (remainingOutputTokens < 1) throw new AnalyzeTokenBudgetError();
     try {
       const generated = await input.client.generate({
         dossier: input.dossier,
         learning: input.learning,
         repair: attempt > 1,
-        maxSteps: input.config.maxSteps,
-        maxOutputTokens: input.config.maxOutputTokens,
+        maxSteps: remainingSteps,
+        maxOutputTokens: remainingOutputTokens,
       });
       costUsd = roundedCost(costUsd + generated.costUsd);
       usage = addUsage(usage, generated.usage);
       stepsUsed += generated.stepsUsed;
-      if (generated.stepsUsed > input.config.maxSteps) {
+      if (stepsUsed > input.config.maxSteps) {
         throw new AnalyzeStepBudgetError();
       }
+      if (usage.outputTokens > input.config.maxOutputTokens) {
+        throw new AnalyzeTokenBudgetError();
+      }
       const draft = AgentAnalysisDraftSchema.parse(generated.output);
+      assertDraftGrounded(draft, input.dossier);
       return { draft, attempts: attempt, stepsUsed, costUsd, usage };
     } catch (error) {
-      if (error instanceof AnalyzeStepBudgetError) throw error;
+      if (
+        error instanceof AnalyzeStepBudgetError ||
+        error instanceof AnalyzeTokenBudgetError
+      ) throw error;
       if (error instanceof SdkAnalyzeStructuredOutputError) {
         costUsd = roundedCost(costUsd + error.costUsd);
         usage = addUsage(usage, error.usage);
+        stepsUsed += error.stepsUsed;
+        if (stepsUsed > input.config.maxSteps) {
+          throw new AnalyzeStepBudgetError();
+        }
+        if (usage.outputTokens > input.config.maxOutputTokens) {
+          throw new AnalyzeTokenBudgetError();
+        }
         lastError = error;
         continue;
       }
       if (error instanceof z.ZodError) {
+        lastError = error;
+        continue;
+      }
+      if (error instanceof AnalyzeDraftGroundingError) {
         lastError = error;
         continue;
       }

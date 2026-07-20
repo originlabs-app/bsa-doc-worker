@@ -135,7 +135,11 @@ describe("runDceAnalyst", () => {
     expect(analyzed.costUsd).toBe(0.04);
     expect(generate).toHaveBeenNthCalledWith(
       2,
-      expect.objectContaining({ repair: true }),
+      expect.objectContaining({
+        repair: true,
+        maxSteps: 5,
+        maxOutputTokens: 7_692,
+      }),
     );
   });
 
@@ -156,6 +160,37 @@ describe("runDceAnalyst", () => {
       costUsd: 0.04,
     } satisfies Partial<AnalyzeLlmInvalidOutputError>);
     expect(generate).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries an analysis that omits an explicitly identified lot", async () => {
+    const allottedDossier: AnalyzeDossierInput = {
+      ...dossier,
+      documents: [
+        { ...dossier.documents[0]!, id: "lot-1", lotNumber: "1" },
+        { ...dossier.documents[0]!, id: "lot-2", lotNumber: "2" },
+      ],
+    };
+    const lotOutput = {
+      marketSummary: "Marché en deux lots.",
+      units: ["1", "2"].map((number) => ({
+        ...validOutput.units[0],
+        unit: { kind: "lot" as const, number, title: `Lot ${number}` },
+        citations: [{ documentId: `lot-${number}`, excerpt: `Lot ${number}` }],
+      })),
+    };
+    const generate = vi.fn()
+      .mockResolvedValueOnce(result(validOutput))
+      .mockResolvedValueOnce(result(lotOutput));
+
+    const analyzed = await runDceAnalyst({
+      dossier: allottedDossier,
+      learning,
+      client: { generate },
+      config: { maxSteps: 8, maxOutputTokens: 8_192 },
+    });
+
+    expect(analyzed.attempts).toBe(2);
+    expect(analyzed.draft.units).toHaveLength(2);
   });
 
   it("rejects a client result beyond the configured step ceiling", async () => {

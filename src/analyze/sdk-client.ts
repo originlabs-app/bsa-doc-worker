@@ -173,6 +173,7 @@ export function createOpenRouterDceAnalystClient(input: {
     async generate(request) {
       const { toolbox, tools } = createTools(request);
       let observedCost = 0;
+      let observedSteps = 0;
       try {
         const result = await callGenerate({
           model: languageModel,
@@ -197,6 +198,7 @@ export function createOpenRouterDceAnalystClient(input: {
         if (toolbox.trace().budgetExceeded) {
           throw new AnalyzeToolBudgetError("agent_tools");
         }
+        observedSteps = result.steps.length;
         const finalMetadata = result.finalStep?.providerMetadata ??
           result.providerMetadata;
         return {
@@ -211,6 +213,7 @@ export function createOpenRouterDceAnalystClient(input: {
           throw new SdkAnalyzeStructuredOutputError(
             observedCost,
             usageFrom(rawUsage),
+            observedSteps,
             { cause: error },
           );
         }
