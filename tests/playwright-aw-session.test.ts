@@ -2,8 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { AwAdapterError } from "../src/adapters/aw-solutions.js";
 import {
+  AW_CAPTCHA_SOLVE_UNIT_BUDGET_PER_ATTEMPT,
+  AW_CAPTCHA_SOLVE_UNIT_COST,
+  AwCaptchaSolveBudget,
   authenticateAwIfPrompted,
+  chooseDceCompletIfPrompted,
+  clickChoixDceIdentificationIfPrompted,
   locateAwLotSelectionForm,
+  waitForCaptchaIfPresent,
 } from "../src/adapters/playwright-aw-session.js";
 
 interface LocatorState {
@@ -193,5 +199,192 @@ describe("locateAwLotSelectionForm", () => {
     };
 
     expect(locateAwLotSelectionForm(page as never)).toBe("lot-form");
+  });
+});
+
+interface TextControlState {
+  visible: boolean;
+  controlCount?: number;
+}
+
+function fakeChoixDcePage(options: {
+  textTargets?: Record<string, TextControlState>;
+  captcha?: { present: boolean; value?: string; solves?: boolean };
+}) {
+  const clicked: string[] = [];
+  const waitForFunction = vi.fn(async () => {
+    if (options.captcha?.solves !== true) throw new Error("fixture timeout");
+  });
+  const page = {
+    locator: (selector: string) => ({
+      first: () => ({
+        count: async () =>
+          selector === "#texteCaptcha" && options.captcha?.present ? 1 : 0,
+        inputValue: async () => options.captcha?.value ?? "",
+      }),
+    }),
+    getByText: (pattern: RegExp) => {
+      const entry = Object.entries(options.textTargets ?? {}).find(([label]) =>
+        pattern.test(label),
+      );
+      const label = entry?.[0] ?? String(pattern);
+      const state = entry?.[1];
+      return {
+        first: () => ({
+          isVisible: async () => state?.visible ?? false,
+          click: async () => {
+            clicked.push(`text:${label}`);
+          },
+          locator: () => ({
+            first: () => ({
+              count: async () => state?.controlCount ?? 0,
+              click: async () => {
+                clicked.push(`control:${label}`);
+              },
+            }),
+          }),
+        }),
+      };
+    },
+    waitForNavigation: vi.fn(async () => null),
+    waitForFunction,
+  };
+  return { page, clicked, waitForFunction };
+}
+
+describe("clickChoixDceIdentificationIfPrompted", () => {
+  it("clicks the identification link on the choixDCE wall", async () => {
+    const wall = "POUR RETIRER UN DCE, VOUS DEVEZ VOUS IDENTIFIER";
+    const { page, clicked } = fakeChoixDcePage({
+      textTargets: { [wall]: { visible: true, controlCount: 1 } },
+    });
+
+    await expect(
+      clickChoixDceIdentificationIfPrompted(page as never, 1_000),
+    ).resolves.toBe(true);
+    expect(clicked).toEqual([`control:${wall}`]);
+  });
+
+  it("does nothing when no identification wall is shown", async () => {
+    const { page, clicked } = fakeChoixDcePage({});
+
+    await expect(
+      clickChoixDceIdentificationIfPrompted(page as never, 1_000),
+    ).resolves.toBe(false);
+    expect(clicked).toEqual([]);
+  });
+});
+
+describe("chooseDceCompletIfPrompted", () => {
+  it("selects the DCE complet option and validates the choice", async () => {
+    const { page, clicked } = fakeChoixDcePage({
+      textTargets: {
+        "Télécharger le DCE complet": { visible: true, controlCount: 1 },
+        Valider: { visible: true, controlCount: 1 },
+      },
+    });
+
+    await expect(
+      chooseDceCompletIfPrompted(page as never, 1_000),
+    ).resolves.toBe(true);
+    expect(clicked).toEqual([
+      "control:Télécharger le DCE complet",
+      "control:Valider",
+    ]);
+  });
+
+  it("clicks the option text directly when no wrapping control exists", async () => {
+    const { page, clicked } = fakeChoixDcePage({
+      textTargets: {
+        "DCE complet": { visible: true, controlCount: 0 },
+      },
+    });
+
+    await expect(
+      chooseDceCompletIfPrompted(page as never, 1_000),
+    ).resolves.toBe(true);
+    expect(clicked).toEqual(["text:DCE complet"]);
+  });
+
+  it("returns false when the surface offers no DCE complet choice", async () => {
+    const { page, clicked } = fakeChoixDcePage({});
+
+    await expect(
+      chooseDceCompletIfPrompted(page as never, 1_000),
+    ).resolves.toBe(false);
+    expect(clicked).toEqual([]);
+  });
+});
+
+describe("waitForCaptchaIfPresent", () => {
+  it("spends no budget when the CAPTCHA is absent", async () => {
+    const budget = new AwCaptchaSolveBudget();
+    const { page, waitForFunction } = fakeChoixDcePage({});
+
+    await waitForCaptchaIfPresent(page as never, 1_000, budget);
+
+    expect(budget.unitsCommitted).toBe(0);
+    expect(waitForFunction).not.toHaveBeenCalled();
+  });
+
+  it("spends no budget when the CAPTCHA is already solved", async () => {
+    const budget = new AwCaptchaSolveBudget();
+    const { page, waitForFunction } = fakeChoixDcePage({
+      captcha: { present: true, value: "solved" },
+    });
+
+    await waitForCaptchaIfPresent(page as never, 1_000, budget);
+
+    expect(budget.unitsCommitted).toBe(0);
+    expect(waitForFunction).not.toHaveBeenCalled();
+  });
+
+  it("commits one Browserless solve when the CAPTCHA gets solved", async () => {
+    const budget = new AwCaptchaSolveBudget();
+    const { page } = fakeChoixDcePage({
+      captcha: { present: true, solves: true },
+    });
+
+    await waitForCaptchaIfPresent(page as never, 1_000, budget);
+
+    expect(budget.unitsCommitted).toBe(AW_CAPTCHA_SOLVE_UNIT_COST);
+  });
+
+  it("reports an unsolved CAPTCHA as retryable after committing the solve", async () => {
+    const budget = new AwCaptchaSolveBudget();
+    const { page } = fakeChoixDcePage({
+      captcha: { present: true, solves: false },
+    });
+
+    await expect(
+      waitForCaptchaIfPresent(page as never, 1_000, budget),
+    ).rejects.toMatchObject({
+      reasonCode: "CAPTCHA_UNSOLVED",
+      retryable: true,
+    } satisfies Partial<AwAdapterError>);
+    expect(budget.unitsCommitted).toBe(AW_CAPTCHA_SOLVE_UNIT_COST);
+  });
+
+  it("funds at most one CAPTCHA solve per attempt and fails honestly beyond", async () => {
+    const budget = new AwCaptchaSolveBudget();
+    const first = fakeChoixDcePage({
+      captcha: { present: true, solves: true },
+    });
+    await waitForCaptchaIfPresent(first.page as never, 1_000, budget);
+
+    const second = fakeChoixDcePage({
+      captcha: { present: true, solves: true },
+    });
+    await expect(
+      waitForCaptchaIfPresent(second.page as never, 1_000, budget),
+    ).rejects.toMatchObject({
+      reasonCode: "CAPTCHA_UNSOLVED",
+      retryable: true,
+    } satisfies Partial<AwAdapterError>);
+
+    expect(second.waitForFunction).not.toHaveBeenCalled();
+    expect(budget.unitsCommitted).toBe(
+      AW_CAPTCHA_SOLVE_UNIT_BUDGET_PER_ATTEMPT,
+    );
   });
 });

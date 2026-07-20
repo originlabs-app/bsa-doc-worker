@@ -2,6 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 
 import { AwAdapterError } from "../src/adapters/aw-solutions.js";
 import { PortalAdapterError } from "../src/adapters/portal-adapter-error.js";
+import {
+  AW_CAPTCHA_SOLVE_UNIT_BUDGET_PER_ATTEMPT,
+  AwCaptchaSolveBudget,
+} from "../src/adapters/playwright-aw-session.js";
 import { loadWorkerConfig } from "../src/config.js";
 import type { RecoveryRequest } from "../src/contracts.js";
 import type { BuyerProfileAdapter } from "../src/ports.js";
@@ -161,6 +165,33 @@ describe("runRecovery", () => {
     expect(report.reasonCode).toBe("RETRY_CAP_REACHED");
     expect(report.attemptsUsed).toBe(2);
     expect(discover).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the AW CAPTCHA solve budget per attempt and blocks recovery at the cap", async () => {
+    const budgets: AwCaptchaSolveBudget[] = [];
+    const discover = vi.fn(async () => {
+      const budget = new AwCaptchaSolveBudget();
+      budgets.push(budget);
+      budget.commitSolve();
+      // A second unsolved CAPTCHA in the same attempt exceeds the budget.
+      budget.commitSolve();
+      throw new Error("unreachable: the budget must fail first");
+    });
+    const report = await runRecovery(
+      requestFor("https://www.marches-publics.info/consultation?IDM=1848852"),
+      loadWorkerConfig({ RECOVERY_MODE: "dry_run" }),
+      { awAdapter: { discover } },
+    );
+
+    expect(report.status).toBe("recovery_blocked");
+    expect(report.reasonCode).toBe("RETRY_CAP_REACHED");
+    expect(report.attemptsUsed).toBe(2);
+    expect(budgets).toHaveLength(2);
+    for (const budget of budgets) {
+      expect(budget.unitsCommitted).toBeLessThanOrEqual(
+        AW_CAPTCHA_SOLVE_UNIT_BUDGET_PER_ATTEMPT,
+      );
+    }
   });
 
   it("blocks a rejected AW login after one attempt", async () => {
