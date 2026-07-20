@@ -36,8 +36,8 @@ de dématérialisation externe. Aucun lien Alsace n'a été ouvert.
 
 ## Coût Browserless
 
-L'API d'usage officielle est passée de **5 à 16 unités** pendant la mission de
-réparation et recette, soit **11 unités**, sous le plafond de 20. Les onze
+L'API d'usage officielle est passée de **5 à 18 unités** pendant la mission de
+réparation et recette, soit **13 unités**, sous le plafond de 20. Les onze
 sessions de diagnostic représentent environ **132 secondes** de navigateur ;
 la session probante finale représente 14,263 s. Aucun solve CAPTCHA n'a été
 déclenché.

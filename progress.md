@@ -51,7 +51,7 @@
   mais sans `urlDCE`/`urlRC` interne et avec `urlDemat` vers
   `plateforme.alsacemarchespublics.eu`; troisième AO absent d'AWSolutions et
   PLACE. Résultat : 0 pièce, 3 `recovery_blocked`.
-- Coût mission : usage Browserless de 5 à 16, soit 11 unités sur le cap de 20 ;
+- Coût mission : usage Browserless de 5 à 18, soit 13 unités sur le cap de 20 ;
   session finale 14,263 s, environ 132 s de diagnostic cumulé.
 - Zéro téléchargement, persistance, écriture BSA, requête DILA ou navigation
   Alsace. Aucun secret, cookie ou lien signé journalisé.
