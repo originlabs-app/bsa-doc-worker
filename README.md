@@ -246,15 +246,16 @@ command requires or authorizes a production connection.
 ## ANALYZE — agentic DCE analysis
 
 `src/analyze/` is the worker-side analyst that consumes READER's already
-extracted documents. It is a library boundary only in this lot: it is not wired
-to a queue, the Railway entrypoint or a production database.
+extracted documents. Its dedicated one-shot entrypoint observes the existing
+analysis queue, assembles a typed dossier, recalls client learning and runs the
+bounded analyst once before exiting.
 
 ```text
 typed READER dossier + company profile + recalled lessons
   -> bounded Vercel AI SDK agent (OpenRouter, four read-only tools)
   -> strict Zod criteria and rich summaries per lot
   -> deterministic score recalculation and redhibitory rules in code
-  -> off | safe dry-run log | injected apply sink
+  -> off | read-only shadow comparison | guarded apply sink
 ```
 
 The agent may read bounded text windows, consult the company profile, inspect
@@ -268,9 +269,21 @@ ANALYZE modes are independent from `RECOVERY_MODE` and `READER_MODE`:
 
 | `ANALYZE_MODE` | Behavior |
 | --- | --- |
-| `off` (default) | Returns before learning recall, model construction or writes. |
-| `dry_run` | Produces and logs a redacted result; it never calls the result sink or records learning-rule usage. Provider calls and read-only lesson recall can still incur cost once a later orchestrator wires them. |
-| `apply` | Requires an explicit injected result sink before analysis. Writes the existing tender/lot/AI-ledger contract, then records approved-rule usage. No concrete production sink or queue wiring exists in this lot. |
+| `off` (default) | Exits before constructing Supabase/OpenRouter clients. |
+| `shadow` | Peeks at up to ten eligible queue rows, analyzes one ready dossier, logs the full per-lot result and the delta against the score re-read after analysis. It never claims or advances the queue and never writes a tender, lot, ledger or learning counter. Repeated launches can therefore observe the same row. |
+| `apply` | Claims through `claim_dce_analysis_queue_row`, writes the guarded existing tender/lot/AI-ledger contracts and completes one queue row. This path exists for a later authorized cutover and must remain disabled until Pierre's explicit GO. |
+
+The ANALYZE command is separate from the READER Railway `start` command:
+
+```sh
+npm run build
+ANALYZE_MODE=off npm run analyze:start
+```
+
+`shadow` and `apply` execute one pass only: no polling, sleep or service loop.
+The shadow path uses a read-only TypeScript capability and calls only selects,
+Storage downloads, `list_tender_analysis_documents`, `match_ao_lessons` and
+approved-rule reads. OpenRouter analysis and embeddings can still incur cost.
 
 Configuration:
 
@@ -280,11 +293,16 @@ OPENROUTER_MODEL_SCORE="openai/gpt-5.6-terra"
 ANALYZE_MAX_STEPS="8"            # hard maximum: 12
 ANALYZE_MAX_OUTPUT_TOKENS="8192" # hard maximum: 8192
 OPENROUTER_API_KEY=""            # required only outside off
+SUPABASE_URL=""                  # required only outside off
+SUPABASE_SERVICE_ROLE_KEY=""     # required only outside off
 ```
 
 Lesson recall ports `match_ao_lessons`, the approved company rules in
 `scraping_memory`, and `record_scraping_memory_usage`. Recall fails open so a
 memory outage cannot block analysis. The result reports `lessons_count`,
 `rules_count` and `learning_applied`; usage is recorded only after a successful
-apply write. All tests use mocks and fixtures, with no OpenRouter, Supabase or
-Railway connection.
+apply write. Dossier assembly uses `list_tender_analysis_documents` and the
+private READER text objects, refuses non-terminal extraction states and caps a
+pass at 100 documents / 1,000,000 characters. All tests use mocks and fixtures,
+with no OpenRouter, Supabase or Railway connection. The historical edge
+`analyze-dce` remains active until the separate cutover lot.
