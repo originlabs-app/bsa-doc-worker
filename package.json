@@ -15,13 +15,23 @@
     "worker": "tsx src/cli.ts"
   },
   "dependencies": {
+    "@openrouter/ai-sdk-provider": "3.0.0",
+    "@supabase/supabase-js": "2.81.1",
+    "ai": "7.0.31",
     "cheerio": "^1.1.2",
+    "fflate": "0.8.3",
+    "pdf-lib": "1.17.1",
     "playwright-core": "^1.58.2",
+    "word-extractor": "1.0.4",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
+    "yauzl": "3.4.0",
     "zod": "^3.25.76"
   },
   "devDependencies": {
     "@eslint/js": "^9.32.0",
     "@types/node": "^22.16.5",
+    "@types/word-extractor": "1.0.6",
+    "@types/yauzl": "3.4.0",
     "eslint": "^9.32.0",
     "globals": "^15.15.0",
     "tsx": "^4.21.0",
