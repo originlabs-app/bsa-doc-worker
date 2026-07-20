@@ -11,6 +11,7 @@ import type {
   AdapterDiscovery,
   EphemeralAttachment,
 } from "../ports.js";
+import { atexoPageAction, isAtexoDownloadActionUrl } from "./atexo.js";
 import { PortalAdapterError } from "./portal-adapter-error.js";
 
 export interface PortalBrowserDiscovery {
@@ -71,24 +72,53 @@ function stableAttachmentId(
   url: URL,
   fileName: string,
 ): string {
+  const material = [
+    platform,
+    consultationId,
+    url.hostname,
+    url.pathname,
+    fileName,
+  ];
+  // Atexo download URLs share the same `/index.php` pathname; their identity
+  // lives in the stable, non-secret query action (and target id when present).
+  const atexoAction = atexoPageAction(url);
+  if (atexoAction !== null) {
+    material.push(atexoAction.toLowerCase());
+    const atexoTargetId = url.searchParams.get("id");
+    if (atexoTargetId) material.push(atexoTargetId);
+  }
   return createHash("sha256")
-    .update(
-      [platform, consultationId, url.hostname, url.pathname, fileName].join(
-        "|",
-      ),
-    )
+    .update(material.join("|"))
     .digest("hex")
     .slice(0, 24);
 }
 
 function isAttachmentUrl(url: URL, rootHost: string): boolean {
+  if (url.protocol !== "https:" || !isHostOrSubdomain(url.hostname, rootHost)) {
+    return false;
+  }
   return (
-    url.protocol === "https:" &&
-    isHostOrSubdomain(url.hostname, rootHost) &&
     /(dce|document|pi[eè]ce|attachment|download|t[eé]l[eé]charg)/i.test(
       url.pathname,
-    )
+    ) || isAtexoDownloadActionUrl(url)
   );
+}
+
+// Action links rendered next to the pieces ("Signer un document", signature
+// pages) are portal features, never downloadable pieces. The night sweep of
+// 2026-07-20 saw exactly this false positive on Maximilien consultation
+// 942952, where the frozen manifest contained "Signer un document".
+const NON_ATTACHMENT_ACTION_LABEL_PATTERN = /^\s*sign(?:er|ature)\b/i;
+const SIGNATURE_ACTION_URL_PATTERN =
+  /(?:^|[/._-])sign(?:er|ature)s?(?=$|[/._-])/i;
+
+function isNonAttachmentActionLink(label: string, url: URL): boolean {
+  if (NON_ATTACHMENT_ACTION_LABEL_PATTERN.test(label)) return true;
+  const atexoAction = atexoPageAction(url);
+  if (atexoAction !== null && /sign(?:er|ature)/i.test(atexoAction)) {
+    return true;
+  }
+  return SIGNATURE_ACTION_URL_PATTERN.test(url.pathname);
 }
 
 export function parsePortalListing(
@@ -120,13 +150,16 @@ export function parsePortalListing(
     }
     if (!isAttachmentUrl(url, options.rootHost)) return;
 
+    const anchorText = $(element).text().trim();
+    if (isNonAttachmentActionLink(anchorText, url)) return;
+
     const pathName =
       url.pathname.split("/").filter(Boolean).at(-1) ?? "attachment";
     const fileName = sanitizeFileName(
       $(element).attr("download")?.trim() ||
         $(element).attr("data-file-name")?.trim() ||
         $(element).attr("data-filename")?.trim() ||
-        $(element).text().trim() ||
+        anchorText ||
         pathName,
       "attachment",
     );

@@ -5,6 +5,7 @@ import {
   resolveExactPortalConsultation,
   type PortalConsultationCandidate,
 } from "../portal-resolver.js";
+import { isAtexoDownloadActionUrl } from "./atexo.js";
 import { PortalAdapterError } from "./portal-adapter-error.js";
 import type {
   PortalBrowserDiscovery,
@@ -320,7 +321,9 @@ export function isSafeManifestControlTarget(
       /\.(?:pdf|zip)$/i.test(target.pathname);
     const attachmentAction =
       (target.searchParams.get("fuseaction") ?? "").toLowerCase() ===
-        "dce.tdoc" || target.searchParams.has("download");
+        "dce.tdoc" ||
+      target.searchParams.has("download") ||
+      isAtexoDownloadActionUrl(target);
     return !attachmentPath && !attachmentAction;
   } catch {
     return false;

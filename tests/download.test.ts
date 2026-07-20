@@ -143,6 +143,16 @@ describe("streamAttachment", () => {
       downloadUrl:
         "https://fichiers.marches.maximilien.fr/dce/attachment/package-7788?token=fixture",
     },
+    {
+      sourcePlatform: "place" as const,
+      downloadUrl:
+        "https://www.marches-publics.gouv.fr/index.php?page=Entreprise.EntrepriseDownloadReglement&id=3040234&orgAcronyme=fixture",
+    },
+    {
+      sourcePlatform: "maximilien" as const,
+      downloadUrl:
+        "https://marches.maximilien.fr/index.php?page=Entreprise.EntrepriseDemandeTelechargementDce&id=942952&orgAcronyme=fixture",
+    },
   ])(
     "streams an allowlisted $sourcePlatform attachment over HTTP",
     async ({ sourcePlatform, downloadUrl }) => {
@@ -166,6 +176,26 @@ describe("streamAttachment", () => {
       expect(target.commit).toHaveBeenCalledOnce();
     },
   );
+
+  it("rejects an Atexo query-string action that is not a download action", async () => {
+    const fetcher = vi.fn();
+    const target = fakeSink();
+
+    await expect(
+      streamAttachment(
+        attachment({
+          sourcePlatform: "maximilien",
+          downloadUrl:
+            "https://marches.maximilien.fr/index.php?page=Entreprise.EntrepriseSignatureDocument&id=942952",
+        }),
+        target.sink,
+        { fetcher },
+      ),
+    ).rejects.toThrow("DOWNLOAD_INCOMPLETE");
+
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(target.sink.open).not.toHaveBeenCalled();
+  });
 
   it("rejects a URL whose host does not match its source platform", async () => {
     const fetcher = vi.fn();

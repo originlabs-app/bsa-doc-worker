@@ -166,4 +166,31 @@ describe("portal Playwright session helpers", () => {
       ),
     ).toBe(false);
   });
+
+  it("never clicks an Atexo query-string download action as a manifest control", () => {
+    const currentUrl =
+      "https://www.marches-publics.gouv.fr/index.php?page=Entreprise.EntrepriseDetailsConsultation&id=3040234";
+
+    expect(
+      isSafeManifestControlTarget(
+        "/index.php?page=Entreprise.EntrepriseDemandeTelechargementDce&id=3040234&orgAcronyme=fixture",
+        currentUrl,
+        "marches-publics.gouv.fr",
+      ),
+    ).toBe(false);
+    expect(
+      isSafeManifestControlTarget(
+        "/index.php?page=Entreprise.EntrepriseDownloadReglement&id=3040234",
+        currentUrl,
+        "marches-publics.gouv.fr",
+      ),
+    ).toBe(false);
+    expect(
+      isSafeManifestControlTarget(
+        "/index.php?page=Entreprise.EntrepriseDetailsConsultation&id=3040234",
+        currentUrl,
+        "marches-publics.gouv.fr",
+      ),
+    ).toBe(true);
+  });
 });

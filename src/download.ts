@@ -3,6 +3,7 @@ import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 
+import { isAtexoDownloadActionUrl } from "./adapters/atexo.js";
 import type { AdapterPlatform } from "./contracts.js";
 import type {
   DocumentIngestionSink,
@@ -41,12 +42,13 @@ function isHostOrSubdomain(hostname: string, rootHost: string): boolean {
 }
 
 function isPortalAttachmentUrl(url: URL, rootHost: string): boolean {
+  if (url.protocol !== "https:" || !isHostOrSubdomain(url.hostname, rootHost)) {
+    return false;
+  }
   return (
-    url.protocol === "https:" &&
-    isHostOrSubdomain(url.hostname, rootHost) &&
     /(dce|document|pi[eè]ce|attachment|download|t[eé]l[eé]charg)/i.test(
       url.pathname,
-    )
+    ) || isAtexoDownloadActionUrl(url)
   );
 }
 

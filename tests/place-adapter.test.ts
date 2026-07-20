@@ -60,6 +60,33 @@ describe("parsePlaceListing", () => {
       }),
     ).toThrow("PLACE manifest did not expose an allowlisted attachment");
   });
+
+  it("manifests the witness consultation pieces from Atexo query-string links", async () => {
+    const discovery = parsePlaceListing({
+      consultationUrl:
+        "https://www.marches-publics.gouv.fr/index.php?page=Entreprise.EntrepriseDetailsConsultation&id=3040234&orgAcronyme=fixture",
+      consultationId: "3040234",
+      selectedLots: ["all"],
+      listingHtml: await readFile(
+        new URL("fixtures/place/manifest-atexo-query.html", import.meta.url),
+        "utf8",
+      ),
+      cookieHeader: "PLACESESSION=fixture-only",
+      userAgent: "bsa-place-fixture",
+    });
+
+    expect(discovery.safeManifest.attachments).toEqual([
+      expect.objectContaining({
+        fileName: "Règlement de consultation - 474,21 Ko",
+      }),
+      expect.objectContaining({
+        fileName: "Dossier de consultation - 3,98 Mo",
+      }),
+    ]);
+    expect(JSON.stringify(discovery.safeManifest)).not.toContain(
+      "Signer un document",
+    );
+  });
 });
 
 describe("MockPlaceBrowserSession", () => {

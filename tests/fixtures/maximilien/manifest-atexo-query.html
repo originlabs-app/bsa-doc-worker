@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="fr">
+  <body>
+    <!-- Sanitized shape of Maximilien consultation 942952 (night sweep
+         2026-07-20): pieces are exposed through Atexo query-string download
+         actions on /index.php, while "Signer un document" is an action link
+         whose pathname contains "document" (the frozen false positive). -->
+    <div class="consultation-pieces">
+      <a
+        href="/index.php?page=Entreprise.EntrepriseDownloadReglement&amp;id=942952&amp;orgAcronyme=fixture"
+      >Règlement de consultation - 550,89 Ko</a>
+      <a
+        href="/index.php?page=Entreprise.EntrepriseDemandeTelechargementDce&amp;id=942952&amp;orgAcronyme=fixture"
+      >Dossier de consultation - 9,38 Mo</a>
+    </div>
+    <nav class="actions-entreprise">
+      <a href="/entreprise/signer-un-document">Signer un document</a>
+      <a href="/index.php?page=Entreprise.EntrepriseSignatureDocument"
+      >Signer un document</a>
+      <a href="https://attacker.invalid/index.php?page=Entreprise.EntrepriseDemandeTelechargementDce&amp;id=942952"
+      >Dossier externe</a>
+    </nav>
+  </body>
+</html>
