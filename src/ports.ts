@@ -1,12 +1,14 @@
 import type { Writable } from "node:stream";
 
 import type {
+  AdapterPlatform,
   RecoveryRequest,
   SafeManifest,
   SafeManifestAttachment,
 } from "./contracts.js";
 
 export interface EphemeralAttachment extends SafeManifestAttachment {
+  sourcePlatform?: AdapterPlatform;
   downloadUrl: string;
   requestHeaders: Readonly<Record<string, string>>;
 }

@@ -4,9 +4,71 @@ import {
   buildDistinctiveQuery,
   parseAwPublicSearch,
   parsePlacePublicSearch,
+  resolveExactPortalConsultation,
   searchAwPublic,
   searchPlacePublic,
 } from "../src/portal-resolver.js";
+
+describe("resolveExactPortalConsultation", () => {
+  const candidates = [
+    {
+      canonicalTitle: "Maintenance des installations thermiques des collèges",
+      reference: "MAX-2026-014",
+      buyerName: "Région Île-de-France",
+      consultationUrl:
+        "https://marches.maximilien.fr/entreprise/consultation/7788",
+    },
+    {
+      canonicalTitle: "Maintenance des ascenseurs des collèges",
+      reference: "MAX-2026-015",
+      buyerName: "Région Île-de-France",
+      consultationUrl:
+        "https://marches.maximilien.fr/entreprise/consultation/7789",
+    },
+  ];
+
+  it("prefers an exact normalized reference", () => {
+    expect(
+      resolveExactPortalConsultation(
+        candidates,
+        { reference: "max-2026-014" },
+        "marches.maximilien.fr",
+      ),
+    ).toBe(
+      "https://marches.maximilien.fr/entreprise/consultation/7788",
+    );
+  });
+
+  it("accepts one strict title-prefix and buyer match", () => {
+    expect(
+      resolveExactPortalConsultation(
+        candidates,
+        {
+          title: "Maintenance des installations thermiques des coll",
+          buyerName: "Region Ile de France",
+        },
+        "marches.maximilien.fr",
+      ),
+    ).toBe(
+      "https://marches.maximilien.fr/entreprise/consultation/7788",
+    );
+  });
+
+  it("rejects candidates outside the allowlisted portal host", () => {
+    expect(() =>
+      resolveExactPortalConsultation(
+        [
+          {
+            ...candidates[0]!,
+            consultationUrl: "https://attacker.invalid/consultation/7788",
+          },
+        ],
+        { reference: "MAX-2026-014" },
+        "marches.maximilien.fr",
+      ),
+    ).toThrow("PORTAL_CONSULTATION_NOT_RESOLVED");
+  });
+});
 
 describe("buildDistinctiveQuery", () => {
   it("selects a discriminating term instead of the truncated title", () => {
