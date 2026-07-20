@@ -9,6 +9,9 @@ Status: local MVP only. The corrected authenticated dry-run is recorded in
 `reports/recette-reelle-dry-run-20260720-login-fix.md`. No GitHub repository, Railway
 service, object-storage sink or BSA import is configured.
 
+The 24-AO recovery-rate sweep is recorded in
+`reports/sweep-dry-run-20260720.md`.
+
 ## Architecture
 
 ```text

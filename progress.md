@@ -60,3 +60,31 @@
 - Gates finaux : lint, typecheck, 46 tests, build et audit npm verts ; gitleaks
   ne détecte aucun secret dans le diff.
 - Rapport : `reports/recette-reelle-dry-run-20260720-login-fix.md`.
+
+## 2026-07-20 — Sweep dry_run élargi, 24 AO
+
+- Source : `sweep-targets-20260720.json`, 24 AO sans pièces sur 10 jours ; 3
+  lignes AWSolutions (protocole A), 21 lignes DILA/TED/autres (protocole B).
+- Protocole A : Bastion redirige vers
+  `plateforme.alsacemarchespublics.eu` sans navigation ; Béziers expose une
+  consultation AWS exacte mais finit `CAPTCHA_UNSOLVED` au cap de 2 ;
+  Saint-Gilles produit un manifeste de 3 pièces.
+- Manifeste Saint-Gilles : tailles inconnue, 686 614 et 630 219 763 octets ;
+  les trois routes répondent à HEAD, mais la plus grande dépasse le garde-fou
+  actuel de 100 MiB. Aucun corps ou fichier n'a été téléchargé.
+- Protocole B : 0/21 équivalent accepté car les 21 lignes ont référence et
+  acheteur vides. Neuf candidats de titre exact ont été observés et rejetés ;
+  aucune correspondance approximative n'a été acceptée.
+- Taux : A 1/3 (33,3 %), B 0/21, global 1/24 (4,2 %), 3 pièces manifestées.
+- Census externe : `plateforme.alsacemarchespublics.eu`, 2 lignes pour 1
+  consultation distincte ; domaine toujours interdit sans GO explicite.
+- Browserless : usage consolidé de 18 à 72, soit 54 unités sur le cap de 120 ;
+  78,808 s sur trois sessions. Allocation estimée : Béziers 32, Saint-Gilles
+  22, autres AO 0.
+- Sûreté : deux tentatives maximum par AO, zéro portail interdit visité, zéro
+  GET de pièce, téléchargement, persistance, écriture BSA/stockage ou statut AO.
+- Matching strict et requêtes distinctives couverts par tests et commits
+  `[skip ci]`. Aucun push, déploiement, GitHub ou Railway.
+- Gates finaux : lint, typecheck, 53 tests, build et audit npm verts ; gitleaks
+  ne détecte aucun secret dans le diff.
+- Rapport : `reports/sweep-dry-run-20260720.md`.
