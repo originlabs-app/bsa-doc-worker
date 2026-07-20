@@ -9,3 +9,4 @@ export * from "./sdk-client.js";
 export * from "./service.js";
 export * from "./toolbox.js";
 export * from "./types.js";
+export * from "./wiring.js";
