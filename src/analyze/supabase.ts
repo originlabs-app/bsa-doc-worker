@@ -7,6 +7,10 @@ import { DOCUMENT_READER_ROLES } from "../llm/document-schemas.js";
 import type { WorkerLogger } from "../logger.js";
 import { buildDceTextPath } from "../reader/storage.js";
 import { shouldAutoMaterializeTenderLots } from "./domain.js";
+import {
+  DEFAULT_ANALYZE_RECORD_TYPES,
+  type AnalyzeRecordType,
+} from "./config.js";
 import type { AnalysisWritePayload } from "./service.js";
 import { LotBusinessFieldsSchema, type LotBusinessFields } from "./types.js";
 import type {
@@ -594,27 +598,40 @@ async function writeAnalysis(
 
 export type SupabaseAnalyzeStore = AnalyzeReadStore & AnalyzeApplyStore;
 
+export interface SupabaseAnalyzeStoreOptions {
+  recordTypes?: readonly AnalyzeRecordType[];
+  logger?: WorkerLogger;
+}
+
 export function createSupabaseAnalyzeStore(
   client: AnalyzeSupabaseClient,
-  options: { logger?: WorkerLogger } = {},
+  options: SupabaseAnalyzeStoreOptions = {},
 ): SupabaseAnalyzeStore {
+  const recordTypes = options.recordTypes ?? DEFAULT_ANALYZE_RECORD_TYPES;
   return {
     async peekCandidates(limit, observedAt) {
+      // The perimeter gate: only tenders whose record_type is in scope are
+      // even visible as candidates (never claimed, never marked). The embed
+      // is qualified on the single tender_id FK so PostgREST cannot pick an
+      // ambiguous relationship, and !inner turns the .in() into a row filter.
       const result = await (client.from("dce_analysis_queue") as {
         select(columns: string): {
-          or(filter: string): {
-            lte(column: string, value: string): {
-              order(column: string, options: { ascending: boolean }): {
+          in(column: string, values: string[]): {
+            or(filter: string): {
+              lte(column: string, value: string): {
                 order(column: string, options: { ascending: boolean }): {
                   order(column: string, options: { ascending: boolean }): {
-                    limit(value: number): Promise<SupabaseResult>;
+                    order(column: string, options: { ascending: boolean }): {
+                      limit(value: number): Promise<SupabaseResult>;
+                    };
                   };
                 };
               };
             };
           };
         };
-      }).select("id,tender_id,attempts")
+      }).select("id,tender_id,attempts,tender!tender_id!inner(record_type)")
+        .in("tender.record_type", [...recordTypes])
         .or("status.eq.pending,and(status.eq.failed,attempts.lt.3)")
         .lte("created_at", observedAt)
         .order("queue_order_at", { ascending: true })

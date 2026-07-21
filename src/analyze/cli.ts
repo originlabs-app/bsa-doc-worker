@@ -82,7 +82,10 @@ function createDependencies(
     supabaseUrl: config.supabaseUrl,
     serviceRoleKey: config.supabaseServiceRoleKey,
   });
-  const store = createSupabaseAnalyzeStore(supabase, { logger });
+  const store = createSupabaseAnalyzeStore(supabase, {
+    logger,
+    recordTypes: config.recordTypes,
+  });
   const learningStore = createSupabaseLearningMemoryStore(
     supabase as unknown as SupabaseLearningClient,
   );
@@ -174,6 +177,7 @@ export async function runAnalyzeCli(
     logger.info("analyze_started", {
       mode: active.mode,
       model: active.model,
+      record_types: active.recordTypes,
       one_shot: true,
     });
     const report = await (options.runner ?? runAnalyzeOneShot)(active, dependencies);

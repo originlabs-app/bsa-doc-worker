@@ -102,6 +102,7 @@ function config(mode: AnalyzeConfig["mode"]): AnalyzeConfig {
     maxSteps: 8,
     maxOutputTokens: 8_192,
     deadlineMinDays: 15,
+    recordTypes: ["standalone"],
     openRouterApiKey: mode === "off" ? undefined : "test",
   };
 }

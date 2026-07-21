@@ -14,12 +14,37 @@ interface QueryOperation {
   args: unknown[];
 }
 
+function valueAtPath(row: unknown, path: string): unknown {
+  return path.split(".").reduce<unknown>(
+    (parent, key) =>
+      parent && typeof parent === "object"
+        ? (parent as Record<string, unknown>)[key]
+        : undefined,
+    row,
+  );
+}
+
 function queryResult(
   result: { data: unknown; error: unknown },
   operations: QueryOperation[],
 ) {
+  let current = result;
   const query = {
     select: (...args: unknown[]) => chain("select", args),
+    // Mirrors the PostgREST semantics of .in() on an !inner embedded column:
+    // rows whose embedded value is outside the list are filtered server-side.
+    in: (...args: unknown[]) => {
+      const [column, values] = args as [string, unknown[]];
+      if (Array.isArray(current.data)) {
+        current = {
+          ...current,
+          data: current.data.filter((row) =>
+            values.includes(valueAtPath(row, column))
+          ),
+        };
+      }
+      return chain("in", args);
+    },
     or: (...args: unknown[]) => chain("or", args),
     lte: (...args: unknown[]) => chain("lte", args),
     order: (...args: unknown[]) => chain("order", args),
@@ -29,11 +54,11 @@ function queryResult(
     not: (...args: unknown[]) => chain("not", args),
     filter: (...args: unknown[]) => chain("filter", args),
     update: (...args: unknown[]) => chain("update", args),
-    maybeSingle: vi.fn(async () => result),
+    maybeSingle: vi.fn(async () => current),
     then: (
       resolve: (value: { data: unknown; error: unknown }) => unknown,
       reject?: (reason: unknown) => unknown,
-    ) => Promise.resolve(result).then(resolve, reject),
+    ) => Promise.resolve(current).then(resolve, reject),
   };
   function chain(method: string, args: unknown[]) {
     operations.push({ method, args });
@@ -189,7 +214,12 @@ describe("Supabase ANALYZE read adapter", () => {
         derogeable: false,
         aliases: ["Qualibat"],
       }],
-      queue: [{ id: "queue-1", tender_id: "tender-1", attempts: 1 }],
+      queue: [{
+        id: "queue-1",
+        tender_id: "tender-1",
+        attempts: 1,
+        tender: { record_type: "standalone" },
+      }],
       documents: [document],
       text: "Travaux de rénovation du bâtiment communal.",
     });
@@ -231,6 +261,11 @@ describe("Supabase ANALYZE read adapter", () => {
     });
     expect(fixture.operations.get("dce_analysis_queue")).toEqual(
       expect.arrayContaining([
+        {
+          method: "select",
+          args: ["id,tender_id,attempts,tender!tender_id!inner(record_type)"],
+        },
+        { method: "in", args: ["tender.record_type", ["standalone"]] },
         { method: "or", args: ["status.eq.pending,and(status.eq.failed,attempts.lt.3)"] },
         { method: "order", args: ["queue_order_at", { ascending: true }] },
         { method: "order", args: ["created_at", { ascending: true }] },
@@ -242,6 +277,85 @@ describe("Supabase ANALYZE read adapter", () => {
     });
     expect(fixture.download).toHaveBeenCalledWith(
       "company-1/tender-1/dce-text/doc-1.txt",
+    );
+  });
+
+  it("ignores market and lot candidates outside the default standalone perimeter", async () => {
+    const fixture = fixtureClient({
+      queue: [
+        {
+          id: "queue-1",
+          tender_id: "tender-1",
+          attempts: 0,
+          tender: { record_type: "standalone" },
+        },
+        {
+          id: "queue-2",
+          tender_id: "tender-2",
+          attempts: 0,
+          tender: { record_type: "market" },
+        },
+        {
+          id: "queue-3",
+          tender_id: "tender-3",
+          attempts: 0,
+          tender: { record_type: "lot" },
+        },
+      ],
+    });
+    const store = createSupabaseAnalyzeStore(fixture.client);
+
+    await expect(store.peekCandidates(
+      10,
+      "2026-07-21T08:00:00.000Z",
+    )).resolves.toEqual([
+      { queueId: "queue-1", tenderId: "tender-1", attempts: 0 },
+    ]);
+    expect(fixture.operations.get("dce_analysis_queue")).toEqual(
+      expect.arrayContaining([
+        { method: "in", args: ["tender.record_type", ["standalone"]] },
+      ]),
+    );
+  });
+
+  it("widens the candidate perimeter to the configured record types", async () => {
+    const fixture = fixtureClient({
+      queue: [
+        {
+          id: "queue-1",
+          tender_id: "tender-1",
+          attempts: 0,
+          tender: { record_type: "standalone" },
+        },
+        {
+          id: "queue-2",
+          tender_id: "tender-2",
+          attempts: 0,
+          tender: { record_type: "market" },
+        },
+        {
+          id: "queue-3",
+          tender_id: "tender-3",
+          attempts: 0,
+          tender: { record_type: "lot" },
+        },
+      ],
+    });
+    const store = createSupabaseAnalyzeStore(fixture.client, {
+      recordTypes: ["market", "lot"],
+    });
+
+    await expect(store.peekCandidates(
+      10,
+      "2026-07-21T08:00:00.000Z",
+    )).resolves.toEqual([
+      { queueId: "queue-2", tenderId: "tender-2", attempts: 0 },
+      { queueId: "queue-3", tenderId: "tender-3", attempts: 0 },
+    ]);
+    expect(fixture.operations.get("dce_analysis_queue")).toEqual(
+      expect.arrayContaining([
+        { method: "in", args: ["tender.record_type", ["market", "lot"]] },
+      ]),
     );
   });
 
@@ -606,10 +720,19 @@ describe("Supabase ANALYZE shadow integration", () => {
     const fixture = fixtureClient({
       tender,
       company,
-      queue: [{ id: "queue-1", tender_id: "tender-1", attempts: 1 }],
+      queue: [{
+        id: "queue-1",
+        tender_id: "tender-1",
+        attempts: 1,
+        tender: { record_type: "market" },
+      }],
       documents: [document],
     });
-    const store = createSupabaseAnalyzeStore(fixture.client);
+    // The perimeter gate applies in shadow too: the market fixture is only
+    // visible because the store is explicitly configured for market records.
+    const store = createSupabaseAnalyzeStore(fixture.client, {
+      recordTypes: ["market"],
+    });
     const logger = { info: vi.fn() };
 
     const report = await runAnalyzeOneShot({
@@ -618,6 +741,7 @@ describe("Supabase ANALYZE shadow integration", () => {
       maxSteps: 8,
       maxOutputTokens: 8_192,
       deadlineMinDays: 15,
+      recordTypes: ["market"],
       openRouterApiKey: "test",
     }, {
       readStore: store,
@@ -689,7 +813,12 @@ describe("Supabase ANALYZE shadow integration", () => {
         submission_date: "2026-07-25",
       },
       company,
-      queue: [{ id: "queue-1", tender_id: "tender-1", attempts: 1 }],
+      queue: [{
+        id: "queue-1",
+        tender_id: "tender-1",
+        attempts: 1,
+        tender: { record_type: "standalone" },
+      }],
       documents: [document],
     });
     const store = createSupabaseAnalyzeStore(fixture.client);
@@ -707,6 +836,7 @@ describe("Supabase ANALYZE shadow integration", () => {
       maxSteps: 8,
       maxOutputTokens: 8_192,
       deadlineMinDays: 15,
+      recordTypes: ["standalone"],
       openRouterApiKey: "test",
     }, {
       readStore: store,
