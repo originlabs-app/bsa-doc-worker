@@ -566,6 +566,23 @@ const SyncLotAnalysisResultSchema = z.object({
   locked: z.number().int().min(0),
 }).passthrough();
 
+/**
+ * LOT E — zero-information guard. A market mother whose analysis maps no lot
+ * at all (every payload lot carries a null relevance_score — typical of a
+ * 48-lot mother beyond the LLM output capacity) brings NO information: the
+ * per-lot LOT D sync guard does not fire because every key matches (null
+ * scores → review_required), yet writing the mother would erase her current
+ * score/description for nothing. The whole write is refused instead.
+ */
+export class AnalyzeMarketZeroLotScoresError extends Error {
+  readonly code = "ANALYZE_MARKET_ZERO_LOT_SCORES";
+
+  constructor(public readonly lotsTotal: number) {
+    super("ANALYZE_MARKET_ZERO_LOT_SCORES");
+    this.name = "AnalyzeMarketZeroLotScoresError";
+  }
+}
+
 export class AnalyzeLotSyncUnmatchedError extends Error {
   readonly code = "ANALYZE_LOT_SYNC_UNMATCHED";
 
@@ -644,6 +661,24 @@ async function writeAnalysis(
   payload: AnalysisWritePayload,
   logger?: WorkerLogger,
 ): Promise<void> {
+  // LOT E — FIRST control, before the guarded tender UPDATE: a market
+  // analysis whose lots are all unscored writes nothing (no tender update,
+  // no materialize, no sync, no ledger); the queue row goes failed instead.
+  // Direct lots (assembly.lot) keep their own voluntary review_required
+  // semantics (LOT B) and are not concerned.
+  if (
+    assembly.recordType === "market" &&
+    assembly.lot === null &&
+    payload.lots.length > 0 &&
+    payload.lots.every((lot) => lot.relevanceScore === null)
+  ) {
+    logger?.info("analyze_market_zero_lot_scores", {
+      tender_id: payload.tenderId,
+      lots_total: payload.lots.length,
+      lots_scored: 0,
+    });
+    throw new AnalyzeMarketZeroLotScoresError(payload.lots.length);
+  }
   const guardedUpdate = await (client.from("tender") as {
     update(values: Record<string, unknown>): {
       eq(column: string, value: string): {
