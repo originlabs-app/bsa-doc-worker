@@ -110,9 +110,35 @@ describe("streamAttachment", () => {
         fetcher,
         maxBytes: 100,
       }),
-    ).rejects.toThrow("DOWNLOAD_INCOMPLETE");
+    ).rejects.toMatchObject({
+      message: "DOWNLOAD_INCOMPLETE",
+      kind: "too_large",
+    });
 
     expect(target.sink.open).not.toHaveBeenCalled();
+  });
+
+  it("types a streamed cap overflow as too_large after aborting quarantine", async () => {
+    const bytes = Buffer.concat([
+      Buffer.from("%PDF-1.7\n"),
+      Buffer.alloc(200, "a"),
+    ]);
+    const fetcher = vi.fn(async () =>
+      new Response(bytes, {
+        status: 200,
+        headers: { "Content-Type": "application/pdf" },
+      }),
+    );
+    const target = fakeSink();
+
+    await expect(
+      streamAttachment(attachment(), target.sink, {
+        fetcher,
+        maxBytes: 100,
+      }),
+    ).rejects.toMatchObject({ kind: "too_large" });
+    expect(target.abort).toHaveBeenCalledOnce();
+    expect(target.commit).not.toHaveBeenCalled();
   });
 
   it("rejects redirects outside the attachment allowlist", async () => {

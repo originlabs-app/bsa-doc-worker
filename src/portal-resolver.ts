@@ -9,6 +9,11 @@ export interface PortalConsultationCandidate {
   consultationUrl: string;
 }
 
+export interface PortalPublicCandidateResult {
+  candidates: PortalConsultationCandidate[];
+  blockedExternalHosts: string[];
+}
+
 interface PortalResolutionHints {
   reference?: string | undefined;
   title?: string | undefined;
@@ -121,6 +126,10 @@ function cleanText(value: string): string {
   return value.replaceAll(/\s+/g, " ").trim();
 }
 
+function withoutLabel(value: string, label: RegExp): string {
+  return cleanText(value).replace(label, "").trim();
+}
+
 function safeHttpsUrl(rawUrl: string | undefined, baseUrl: string): URL | null {
   if (!rawUrl) return null;
   try {
@@ -223,16 +232,17 @@ async function expandPlaceResults(
   html: string,
   cookieHeader: string,
   fetchImpl: typeof fetch,
+  origin = "https://www.marches-publics.gouv.fr",
 ): Promise<string> {
   const $ = load(html);
   const pageState = $("#PRADO_PAGESTATE").attr("value") ?? "";
   const action = $("form#ctl0_ctl1").attr("action");
-  const actionUrl = safeHttpsUrl(action, "https://www.marches-publics.gouv.fr");
+  const actionUrl = safeHttpsUrl(action, origin);
   if (
     !pageState ||
     pageState.length > MAX_SEARCH_RESPONSE_BYTES ||
     !actionUrl ||
-    actionUrl.origin !== "https://www.marches-publics.gouv.fr"
+    actionUrl.origin !== origin
   ) {
     throw new Error("PORTAL_SEARCH_EXPANSION_BLOCKED");
   }
@@ -378,6 +388,202 @@ export function parsePlacePublicSearch(
     }
   }
   return { type: "not_found", portal: "place" };
+}
+
+export function parseAwPublicCandidates(
+  html: string,
+): PortalPublicCandidateResult {
+  const $ = load(html);
+  const candidates: PortalConsultationCandidate[] = [];
+  const blockedExternalHosts = new Set<string>();
+  for (const element of $("div.container-fluid#entity").toArray()) {
+    const titleBox = $(element).find("#titre_box").first().clone();
+    titleBox.find(".ref-acheteur, p").remove();
+    const canonicalTitle = cleanText(titleBox.text());
+    const reference = withoutLabel(
+      $(element).find(".ref-acheteur, [class*='reference']").first().text(),
+      /^(?:référence(?:\s+acheteur)?|reference(?:\s+acheteur)?)\s*:\s*/i,
+    );
+    const buyerElement = $(element)
+      .find(".acheteur:not(.ref-acheteur), .buyer, p")
+      .filter((_index, candidate) =>
+        /^(?:acheteur|buyer)\s*:/i.test(cleanText($(candidate).text())),
+      )
+      .first();
+    const buyerName = withoutLabel(
+      buyerElement.text(),
+      /^(?:acheteur|buyer)\s*:\s*/i,
+    );
+
+    for (const anchor of $(element).find("a[href]").toArray()) {
+      const label = cleanText($(anchor).text());
+      const title = $(anchor).attr("title") ?? "";
+      const url = safeHttpsUrl(
+        $(anchor).attr("href"),
+        "https://www.marches-publics.info",
+      );
+      if (!url) continue;
+      if (
+        (label === "DCE" || /Dossier de Consultation/i.test(title)) &&
+        isAwDceUrl(url) &&
+        canonicalTitle
+      ) {
+        candidates.push({
+          canonicalTitle,
+          reference,
+          buyerName,
+          consultationUrl: url.toString(),
+        });
+      } else if (
+        (label === "Déposer un pli" || /Candidature et\/ou Offre/i.test(title)) &&
+        !isHostOrSubdomain(url.hostname.toLowerCase(), "marches-publics.info")
+      ) {
+        blockedExternalHosts.add(url.hostname.toLowerCase());
+      }
+    }
+  }
+  return {
+    candidates: candidates.slice(0, 100),
+    blockedExternalHosts: [...blockedExternalHosts].sort(),
+  };
+}
+
+function atexoOrigin(portal: "place" | "maximilien"): string {
+  return portal === "place"
+    ? "https://www.marches-publics.gouv.fr"
+    : "https://marches.maximilien.fr";
+}
+
+function isAtexoConsultationUrl(
+  url: URL,
+  portal: "place" | "maximilien",
+): boolean {
+  if (url.origin !== atexoOrigin(portal)) return false;
+  if (/^\/app\.php\/entreprise\/consultation\/\d+$/.test(url.pathname)) {
+    return true;
+  }
+  return (
+    url.pathname.toLowerCase().endsWith("/index.php") &&
+    (url.searchParams.get("page") ?? "") ===
+      "Entreprise.EntrepriseDetailsConsultation" &&
+    /^\d+$/.test(url.searchParams.get("id") ?? "")
+  );
+}
+
+export function parseAtexoPublicCandidates(
+  html: string,
+  portal: "place" | "maximilien",
+): PortalPublicCandidateResult {
+  const $ = load(html);
+  const candidates: PortalConsultationCandidate[] = [];
+  for (const element of $(".item_consultation").toArray()) {
+    const canonicalTitle = cleanText(
+      $(element).find(".objet-line [title]").first().attr("title") ??
+        $(element).find(".objet-line").first().text(),
+    );
+    const reference = withoutLabel(
+      $(element).find(".reference, [class*='reference']").first().text(),
+      /^(?:référence|reference)\s*:\s*/i,
+    );
+    const buyerName = withoutLabel(
+      $(element)
+        .find(".acheteur, [class*='acheteur'], [class*='organisme']")
+        .first()
+        .text(),
+      /^(?:acheteur|organisme)\s*:\s*/i,
+    );
+    const href = $(element)
+      .find("a[href]")
+      .filter((_index, anchor) =>
+        /Accéder à la consultation/i.test(cleanText($(anchor).text())),
+      )
+      .first()
+      .attr("href");
+    const consultationUrl = safeHttpsUrl(href, atexoOrigin(portal));
+    if (
+      canonicalTitle &&
+      consultationUrl &&
+      isAtexoConsultationUrl(consultationUrl, portal)
+    ) {
+      candidates.push({
+        canonicalTitle,
+        reference,
+        buyerName,
+        consultationUrl: consultationUrl.toString(),
+      });
+    }
+  }
+  return { candidates: candidates.slice(0, 100), blockedExternalHosts: [] };
+}
+
+async function searchAtexoPublicCandidates(
+  portal: "place" | "maximilien",
+  query: string,
+  fetchImpl: typeof fetch,
+): Promise<PortalPublicCandidateResult> {
+  const origin = atexoOrigin(portal);
+  const searchUrl = `${origin}/espace-entreprise/search`;
+  const firstResponse = await fetchImpl(searchUrl, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      fromHomeSimpleSearch: "1",
+      categorie: "0",
+      keyWord: query,
+    }),
+    redirect: "manual",
+    signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
+  });
+  if (![302, 303].includes(firstResponse.status)) {
+    return parseAtexoPublicCandidates(
+      await readBoundedHtml(firstResponse),
+      portal,
+    );
+  }
+
+  const redirectUrl = safeHttpsUrl(
+    firstResponse.headers.get("location") ?? undefined,
+    searchUrl,
+  );
+  if (!redirectUrl || redirectUrl.origin !== origin) {
+    throw new Error("PORTAL_SEARCH_REDIRECT_BLOCKED");
+  }
+  const cookieHeader = safeCookieHeader(firstResponse);
+  const secondResponse = await fetchImpl(redirectUrl, {
+    method: "GET",
+    ...(cookieHeader ? { headers: { Cookie: cookieHeader } } : {}),
+    redirect: "error",
+    signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
+  });
+  let html = await readBoundedHtml(secondResponse);
+  const resultCount = placeResultCount(html);
+  if (resultCount > 20) throw new Error("PORTAL_SEARCH_RESULT_CAP_REACHED");
+  if (resultCount > 10) {
+    html = await expandPlaceResults(html, cookieHeader, fetchImpl, origin);
+  }
+  return parseAtexoPublicCandidates(html, portal);
+}
+
+export async function searchPortalPublicCandidates(
+  portal: PortalName,
+  query: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<PortalPublicCandidateResult> {
+  if (portal === "aw_solutions") {
+    const html = await postPublicSearch(
+      "https://www.marches-publics.info/Annonces/lister",
+      new URLSearchParams({
+        IDE: "EC",
+        IDN: "X",
+        IDR: "X",
+        txtLibre: query,
+        Rechercher: "Rechercher",
+      }),
+      fetchImpl,
+    );
+    return parseAwPublicCandidates(html);
+  }
+  return searchAtexoPublicCandidates(portal, query, fetchImpl);
 }
 
 export async function searchAwPublic(

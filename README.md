@@ -6,8 +6,10 @@ safe adapter contract and can be verified from sanitized fixtures without
 secrets, deployment or BSA production writes.
 
 Status: local implementation only. The corrected authenticated AW dry-run is
-recorded in `reports/recette-reelle-dry-run-20260720-login-fix.md`. No GitHub
-repository, Railway service, object-storage sink or BSA import is configured.
+recorded in `reports/recette-reelle-dry-run-20260720-login-fix.md`. The
+autonomous one-shot recovery and its object-storage sink are implemented but
+remain `off`; no migration has been applied, and no GitHub/Railway deployment
+or BSA production write was performed by this lot.
 
 PLACE and Maximilien are deterministic and mock-tested, but their real portal
 selectors/login/manifests have not been recetted. That recipe remains an
@@ -21,7 +23,7 @@ former Vercel `document-extractor`. It is implemented and tested, but remains
 disabled by default and has not been connected to Supabase, OpenRouter,
 Nukema, Railway or any production environment.
 
-## Architecture
+## Legacy manifest worker architecture
 
 ```text
 Nukema URL -> AW / PLACE / Maximilien route
@@ -54,7 +56,68 @@ npm run build
 
 No secret is required for installation, tests, build or mock operation.
 
-## Modes
+## Autonomous recovery one-shot
+
+`src/recovery/cli.ts` selects active `opportunity` tenders with a buyer profile
+and no active document, then searches AW, PLACE and Maximilien every time. It
+accepts only an exact normalized reference or the calibrated strong match;
+medium evidence is recorded as `ambiguous` and never fetched. An unsupported
+buyer portal such as achatpublic is recorded as `blocked` when none of the
+three allowlisted portals provides a match.
+
+The worker is one-shot: Railway owns scheduling, and the process contains no
+`setInterval`. Build and run it manually with:
+
+```sh
+npm run build
+RECOVERY_MODE=dry_run node dist/recovery/cli.js
+```
+
+Apply is an explicit environment choice and requires Supabase plus every
+portal secret. It downloads every attachment into a private quarantine,
+rejects the whole batch before upload if one file exceeds 256 MiB, uploads
+with overwrite disabled under `{company_id}/{tender_id}/{file_name}`, inserts
+`tender_document` idempotently, then enqueues analysis through the existing
+lot-aware database function:
+
+```sh
+RECOVERY_MODE=apply node dist/recovery/cli.js
+```
+
+The database contract is supplied but deliberately not applied by this repo:
+`sql/20260721130000_tender_dce_recovery_attempt.sql`. It creates the
+worker-owned attempt/backoff registry and bounded service-role RPCs. Apply
+fails before portal traffic unless exactly one profile named
+`Système Ingestion Nukema` exists; its UUID becomes the non-null `added_by`.
+
+Recommended Railway command and UTC cron for 07:15 Europe/Paris across summer
+and winter time:
+
+```text
+node dist/recovery/cli.js --scheduled
+15 5,6 * * *
+```
+
+The duplicate UTC hours are intentional. `--scheduled` proceeds only during
+the local Paris 07h hour (late starts are accepted) and logs
+`recovery_skipped_wrong_hour` before constructing a database or portal client
+otherwise.
+
+Continuous recovery modes:
+
+| `RECOVERY_MODE` | Behavior |
+| --- | --- |
+| `off` (default) | Exits without constructing Supabase, portal or storage clients. |
+| `dry_run` | Reads eligible tenders and searches all three public indexes; no attempt write, Browserless session, CAPTCHA solve, download, upload or database mutation. |
+| `apply` | Claims each tender once per Paris day, fetches exact/strong matches, uploads verified files and persists the manifest atomically. |
+
+The retry schedule is 24 hours after attempt 1, 72 hours after attempt 2 and
+7 days thereafter. An interrupted in-flight attempt remains protected until
+its retry time, then is marked `error` and replayed. AW shares one ten-unit
+CAPTCHA budget across the whole run; PLACE and Maximilien recovery sessions do
+not enable paid CAPTCHA solving.
+
+## Legacy manifest CLI modes
 
 | Mode | Default | Behavior |
 | --- | --- | --- |
@@ -171,8 +234,8 @@ missing-secret requests do not invoke the usage API.
 
 ## Download and storage safety
 
-`streamAttachment(...)` is a library boundary for the future authorized apply
-path; the CLI does not call it today. It:
+`streamAttachment(...)` is the guarded download boundary used by autonomous
+apply after manifest discovery. The legacy manifest CLI does not call it. It:
 
 - accepts only HTTPS attachment URLs matching the source adapter's AW, PLACE or
   Maximilien host/path allowlist;
@@ -185,20 +248,16 @@ path; the CLI does not call it today. It:
 - requires sink-level integrity validation before commit and aborts quarantine
   on any failure.
 
-The 100 MiB threshold is a temporary safety guard, not an approved product
-limit. A future durable sink must validate complete ZIP integrity before
-promotion.
+The library default remains 100 MiB for legacy callers. Autonomous recovery
+passes the approved 256 MiB cap explicitly and performs every download in
+local quarantine before the first storage upload.
 
-## Future authorized apply path
+## Activation remains a separate decision
 
-After a fresh explicit GO from Pierre, a separate lot may implement a durable
-`DocumentIngestionSink`, promote only fully validated attachments, then inject
-them through BSA's normal documentary circuit (`tender_document` and existing
-DCE analysis queue). It must remain idempotent by tender, platform, attachment
-identity and hash.
-
-Creating the GitHub repository, configuring Railway, adding secrets, running a
-real recipe and enabling production writes are separate ship decisions.
+The autonomous sink now exists behind `RECOVERY_MODE=apply`, but activation is
+not part of this implementation lot. Applying the SQL migration, configuring
+Railway/secrets, running a real recipe and enabling production writes remain
+separate orchestrator decisions on this `prod-sensitive` surface.
 
 ## READER — document extraction queue
 

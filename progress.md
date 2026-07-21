@@ -342,3 +342,43 @@
 - Worktree dédié `../BSA_DCE_RECOVERY_WORKER-reader-hardening`, branche
   `feat/reader-hardening` depuis main `8ffab18`. Pas de push (merge Pierre).
 - Statut : READER-HARDENING GELÉ (fixes aux commits `038451d` + `46a32e9`).
+
+## 2026-07-21 — Recovery apply continuous — tranche SQL
+
+- TRANCHE SQL GELÉE au 5ebe62b
+
+## 2026-07-21 — RECOVERY-APPLY-CONTINUOUS : boucle autonome one-shot gelée
+
+- Bénéfice : un AO `opportunity` sans document peut désormais retrouver son
+  DCE tout seul sur AW, PLACE ou Maximilien, sans intervention humaine. Les
+  rapprochements moyens restent en revue (`ambiguous`) et aucun portail hors
+  allowlist n'est contacté.
+- Sélection/registre : migration fournie seulement (non appliquée)
+  `sql/20260721130000_tender_dce_recovery_attempt.sql`; zéro document actif,
+  buyer profile requis, parent de marché seulement, claim unique par jour
+  Paris et backoff 24 h → 72 h → 7 j. Reprise après crash prouvée.
+- Apply : préflight d'un unique profil `Système Ingestion Nukema`, `added_by`
+  non nullable, quarantaine complète, cap 256 MiB honnête, upload sans
+  overwrite sous `{company_id}/{tender_id}/{file_name}`, insert idempotent et
+  enqueue via `queue_tender_analysis_target`. Deux persistances du même
+  manifeste donnent 1 document et 1 queue.
+- Doctrine : recherche publique sur les 3 portails pour chaque cible ; EXACTE
+  = référence normalisée, FORTE = acheteur exact + Jaccard titre ≥ 0,50 ou
+  titre ≥ 0,70 confirmé par au moins 2 lots ; MOYENNE jamais fetchée. AW
+  partage un seul budget CAPTCHA de 10 unités par run ; dry-run = zéro write,
+  zéro download, zéro Browserless/CAPTCHA.
+- CLI : `node dist/recovery/cli.js` (one-shot), ou
+  `node dist/recovery/cli.js --scheduled` avec cron Railway UTC
+  `15 5,6 * * *`; le garde local n'exécute qu'à 07 h Europe/Paris et accepte
+  un démarrage tardif dans l'heure. Aucun `setInterval`.
+- Gates Node 22, tous en avant-plan : `npm run test:ci` 248/248 (40 fichiers),
+  `npm run lint`, `npm run typecheck`, `npm run build`, smoke CLI OFF,
+  `npm audit --audit-level=high` (0 vulnérabilité), gitleaks (0 fuite),
+  `git diff --check` vert.
+- Périmètre respecté : aucun changement sous `src/reader`, `src/analyze` ou
+  `src/worker.ts`; aucune clé réelle, requête portail réelle, écriture DB ou
+  Storage, application de migration, push, merge ou deploy.
+- Worktree `../BSA_DCE_RECOVERY_WORKER-recovery-apply-continuous-audit`, branche
+  `feat/recovery-apply-continuous-audit`, base exacte `origin/main` `046c04e`.
+  Implémentation et documentation gelées à `ff3dde0`; le commit de ce
+  checkpoint porte le gel final.
