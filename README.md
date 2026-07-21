@@ -23,7 +23,7 @@ former Vercel `document-extractor`. It is implemented and tested, but remains
 disabled by default and has not been connected to Supabase, OpenRouter,
 Nukema, Railway or any production environment.
 
-## Architecture
+## Legacy manifest worker architecture
 
 ```text
 Nukema URL -> AW / PLACE / Maximilien route
@@ -234,8 +234,8 @@ missing-secret requests do not invoke the usage API.
 
 ## Download and storage safety
 
-`streamAttachment(...)` is a library boundary for the future authorized apply
-path; the CLI does not call it today. It:
+`streamAttachment(...)` is the guarded download boundary used by autonomous
+apply after manifest discovery. The legacy manifest CLI does not call it. It:
 
 - accepts only HTTPS attachment URLs matching the source adapter's AW, PLACE or
   Maximilien host/path allowlist;
@@ -248,9 +248,9 @@ path; the CLI does not call it today. It:
 - requires sink-level integrity validation before commit and aborts quarantine
   on any failure.
 
-The 100 MiB threshold is a temporary safety guard, not an approved product
-limit. A future durable sink must validate complete ZIP integrity before
-promotion.
+The library default remains 100 MiB for legacy callers. Autonomous recovery
+passes the approved 256 MiB cap explicitly and performs every download in
+local quarantine before the first storage upload.
 
 ## Activation remains a separate decision
 
