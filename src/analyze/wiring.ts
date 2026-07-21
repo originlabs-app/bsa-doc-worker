@@ -8,6 +8,7 @@ import type { AnalyzeConfig } from "./config.js";
 import {
   runAnalyzeService,
   type AnalysisResultSink,
+  type AnalyzeLotContext,
   type AnalyzeResult,
 } from "./service.js";
 
@@ -23,6 +24,8 @@ export interface AnalyzeDossierAssembly {
   queue: AnalyzeQueueCandidate;
   companyId: string;
   recordType: string | null;
+  /** Non-null exactly when record_type = 'lot' (direct lot analysis). */
+  lot: AnalyzeLotContext | null;
   existingScore: number | null;
   deadlineDate: string | null;
   dossier: AnalyzeDossierInput;
@@ -220,6 +223,7 @@ export async function runAnalyzeOneShot(
         config,
         dossier: assembly.dossier,
         deadlineDate: assembly.deadlineDate,
+        lot: assembly.lot,
         client: dependencies.client,
         recallLearning: () => dependencies.recallLearning(assembly),
         ...(sink ? { sink } : {}),
