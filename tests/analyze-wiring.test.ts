@@ -7,6 +7,8 @@ import type {
   AnalysisResultSink,
 } from "../src/analyze/index.js";
 import {
+  buildLastError,
+  codeOf,
   runAnalyzeOneShot,
   type AnalyzeApplyStore,
   type AnalyzeDossierAssembly,
@@ -293,5 +295,152 @@ describe("runAnalyzeOneShot", () => {
       "analyze_one_shot_failed",
       expect.objectContaining({ issue: "ANALYZE_FAILED" }),
     );
+  });
+
+  it("persists the error detail through markFailed and logs analyze_error_detail", async () => {
+    const sink = { write: vi.fn() } satisfies AnalysisResultSink;
+    const writes = applyStore(sink);
+    const logger = { info: vi.fn() };
+    const providerError = new Error("Bad gateway from provider upstream");
+    providerError.name = "AI_APICallError";
+
+    const report = await runAnalyzeOneShot(config("apply"), {
+      readStore: readStore(),
+      applyStore: writes,
+      client: { generate: vi.fn().mockRejectedValue(providerError) },
+      recallLearning: vi.fn().mockResolvedValue(learning),
+      logger,
+    });
+
+    expect(report).toMatchObject({
+      mode: "apply",
+      status: "failed",
+      issue: "ANALYZE_FAILED",
+    });
+    expect(writes.markFailed).toHaveBeenCalledWith(
+      "queue-1",
+      1,
+      "ANALYZE_FAILED: AI_APICallError: Bad gateway from provider upstream",
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      "analyze_error_detail",
+      expect.objectContaining({
+        queue_id: "queue-1",
+        tender_id: "tender-1",
+        code: "ANALYZE_FAILED",
+        name: "AI_APICallError",
+        message: "Bad gateway from provider upstream",
+        stack_head: expect.stringContaining("AI_APICallError"),
+      }),
+    );
+    const detailRecord = logger.info.mock.calls.find(
+      (call) => call[0] === "analyze_error_detail",
+    )?.[1] as { stack_head: string };
+    expect(detailRecord.stack_head.split("\n").length).toBeLessThanOrEqual(3);
+    expect(logger.info).not.toHaveBeenCalledWith(
+      "analyze_row_terminal",
+      expect.anything(),
+    );
+  });
+
+  it("logs analyze_row_terminal when markFailed reaches the attempts cap", async () => {
+    const sink = { write: vi.fn() } satisfies AnalysisResultSink;
+    const writes = applyStore(sink);
+    const logger = { info: vi.fn() };
+    const terminalCandidate = { queueId: "queue-9", tenderId: "tender-9", attempts: 2 };
+
+    await runAnalyzeOneShot(config("apply"), {
+      readStore: readStore({
+        peekCandidates: vi.fn().mockResolvedValue([terminalCandidate]),
+        assembleCandidate: vi.fn().mockResolvedValue({
+          status: "ready",
+          assembly: { ...assembly, queue: terminalCandidate },
+        }),
+      }),
+      applyStore: writes,
+      client: { generate: vi.fn().mockRejectedValue(new Error("provider down")) },
+      recallLearning: vi.fn().mockResolvedValue(learning),
+      logger,
+    });
+
+    expect(writes.markFailed).toHaveBeenCalledWith(
+      "queue-9",
+      3,
+      "ANALYZE_FAILED: provider down",
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      "analyze_row_terminal",
+      expect.objectContaining({
+        queue_id: "queue-9",
+        tender_id: "tender-9",
+        attempts: 3,
+        code: "ANALYZE_FAILED",
+      }),
+    );
+  });
+});
+
+describe("codeOf", () => {
+  it("prefers an uppercase code property", () => {
+    const error = Object.assign(new Error("rich message"), { code: "AGENT_STEP_LIMIT" });
+    expect(codeOf(error)).toBe("AGENT_STEP_LIMIT");
+  });
+
+  it("uses the message when it already is a code", () => {
+    expect(codeOf(new Error("ANALYZE_QUEUE_READ_FAILED"))).toBe("ANALYZE_QUEUE_READ_FAILED");
+  });
+
+  it("falls back to ANALYZE_FAILED for rich messages", () => {
+    expect(codeOf(new Error("provider exploded"))).toBe("ANALYZE_FAILED");
+  });
+});
+
+describe("buildLastError", () => {
+  it("appends the rich message after the code", () => {
+    expect(buildLastError(new Error("provider exploded"))).toBe(
+      "ANALYZE_FAILED: provider exploded",
+    );
+  });
+
+  it("keeps a code-only message unchanged", () => {
+    expect(buildLastError(new Error("ANALYZE_SERVICE_DID_NOT_ANALYZE"))).toBe(
+      "ANALYZE_SERVICE_DID_NOT_ANALYZE",
+    );
+  });
+
+  it("includes the SDK error name", () => {
+    const error = new Error("429 rate limited");
+    error.name = "AI_APICallError";
+    expect(buildLastError(error)).toBe("ANALYZE_FAILED: AI_APICallError: 429 rate limited");
+  });
+
+  it("truncates long messages to about 300 characters", () => {
+    const long = "x".repeat(1_000);
+    const built = buildLastError(new Error(long));
+    expect(built.startsWith("ANALYZE_FAILED: ")).toBe(true);
+    expect(built.length).toBeLessThanOrEqual("ANALYZE_FAILED: ".length + 301);
+    expect(built.endsWith("…")).toBe(true);
+  });
+
+  it("keeps the bare code for typed guard errors whose message is the code", () => {
+    const error = new Error("ANALYZE_LOT_SYNC_UNMATCHED");
+    error.name = "AnalyzeLotSyncUnmatchedError";
+    expect(buildLastError(error)).toBe("ANALYZE_LOT_SYNC_UNMATCHED");
+  });
+
+  it("returns the bare code when the error has no message", () => {
+    expect(buildLastError(new Error(""))).toBe("ANALYZE_FAILED");
+  });
+
+  it("stringifies non-Error values", () => {
+    expect(buildLastError("boom string")).toBe("ANALYZE_FAILED: boom string");
+  });
+
+  it("redacts URL query strings so tokens never reach last_error", () => {
+    const built = buildLastError(
+      new Error("fetch failed https://provider.example/error?token=secret123"),
+    );
+    expect(built).not.toContain("secret123");
+    expect(built).toContain("https://provider.example/error?[REDACTED]");
   });
 });

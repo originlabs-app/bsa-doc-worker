@@ -101,17 +101,64 @@ export type AnalyzeOneShotReport =
       result: AnalyzeResult;
     };
 
-function shortIssue(error: unknown): string {
+const ERROR_CODE_PATTERN = /^[A-Z][A-Z0-9_]{2,100}$/;
+/** Mirrors the peek query filter (status.eq.failed,attempts.lt.3): a row at 3 is terminal. */
+export const ANALYZE_MAX_ATTEMPTS = 3;
+const LAST_ERROR_DETAIL_MAX = 300;
+const LOG_MESSAGE_MAX = 500;
+
+/** Short machine identifier for metrics/state; never carries provider bodies. */
+export function codeOf(error: unknown): string {
   const code = error && typeof error === "object" && "code" in error
     ? (error as { code?: unknown }).code
     : undefined;
-  if (typeof code === "string" && /^[A-Z][A-Z0-9_]{2,100}$/.test(code)) {
+  if (typeof code === "string" && ERROR_CODE_PATTERN.test(code)) {
     return code;
   }
   const message = error instanceof Error ? error.message : String(error);
-  return /^[A-Z][A-Z0-9_]{2,100}$/.test(message)
+  return ERROR_CODE_PATTERN.test(message)
     ? message
     : "ANALYZE_FAILED";
+}
+
+function redactUrlQueries(text: string): string {
+  return text.replace(/(https?:\/\/[^\s"']*\?)[^\s"']*/g, "$1[REDACTED]");
+}
+
+function truncate(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max)}…`;
+}
+
+function messageOf(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return redactUrlQueries(message.trim());
+}
+
+function detailOf(error: unknown): string {
+  const message = messageOf(error);
+  const name = error instanceof Error && error.name && error.name !== "Error"
+    ? error.name
+    : null;
+  return name ? (message ? `${name}: ${message}` : name) : message;
+}
+
+/**
+ * last_error persisted on the queue row: keeps the short code as identifier
+ * but appends the real (redacted, truncated) detail so failures stay
+ * diagnosable — the raw "ANALYZE_FAILED" alone made prod failures opaque.
+ */
+export function buildLastError(error: unknown): string {
+  const code = codeOf(error);
+  const message = messageOf(error);
+  // A message that only restates the code (typed guard errors) adds nothing:
+  // keep last_error identical to the historical short form.
+  if (!message || message === code) return code;
+  return `${code}: ${truncate(detailOf(error), LAST_ERROR_DETAIL_MAX)}`;
+}
+
+function stackHead(error: unknown): string | null {
+  if (!(error instanceof Error) || !error.stack) return null;
+  return redactUrlQueries(error.stack.split("\n").slice(0, 3).join("\n"));
 }
 
 function logShadowResult(input: {
@@ -282,13 +329,30 @@ export async function runAnalyzeOneShot(
         result: serviceReport.result,
       };
     } catch (error) {
-      const issue = shortIssue(error);
+      const issue = codeOf(error);
+      dependencies.logger?.info("analyze_error_detail", {
+        queue_id: candidate.queueId,
+        tender_id: candidate.tenderId,
+        code: issue,
+        name: error instanceof Error ? error.name : typeof error,
+        message: truncate(messageOf(error), LOG_MESSAGE_MAX),
+        stack_head: stackHead(error),
+      });
       if (config.mode === "apply" && claimed && dependencies.applyStore) {
+        const attempts = candidate.attempts + 1;
         await dependencies.applyStore.markFailed(
           candidate.queueId,
-          candidate.attempts + 1,
-          issue,
+          attempts,
+          buildLastError(error),
         );
+        if (attempts >= ANALYZE_MAX_ATTEMPTS) {
+          dependencies.logger?.info("analyze_row_terminal", {
+            queue_id: candidate.queueId,
+            tender_id: candidate.tenderId,
+            attempts,
+            code: issue,
+          });
+        }
       }
       dependencies.logger?.info("analyze_one_shot_failed", {
         mode: config.mode,
