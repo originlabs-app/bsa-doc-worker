@@ -82,7 +82,7 @@ function createDependencies(
     supabaseUrl: config.supabaseUrl,
     serviceRoleKey: config.supabaseServiceRoleKey,
   });
-  const store = createSupabaseAnalyzeStore(supabase);
+  const store = createSupabaseAnalyzeStore(supabase, { logger });
   const learningStore = createSupabaseLearningMemoryStore(
     supabase as unknown as SupabaseLearningClient,
   );

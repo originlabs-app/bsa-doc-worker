@@ -1,9 +1,14 @@
+import { createHash } from "node:crypto";
+
 import { createClient } from "@supabase/supabase-js";
 import { z } from "zod";
 
 import { DOCUMENT_READER_ROLES } from "../llm/document-schemas.js";
+import type { WorkerLogger } from "../logger.js";
 import { buildDceTextPath } from "../reader/storage.js";
+import { shouldAutoMaterializeTenderLots } from "./domain.js";
 import type { AnalysisWritePayload } from "./service.js";
+import { LotBusinessFieldsSchema, type LotBusinessFields } from "./types.js";
 import type {
   AnalyzeApplyStore,
   AnalyzeAssemblyReport,
@@ -73,6 +78,10 @@ const TenderRowSchema = z.object({
   lot_title: z.string().nullable(),
   source_lot_key: z.string().nullable(),
   lot_analysis_state: z.string().nullable(),
+  source: z.string().nullable(),
+  lot_structure_mode: z.string().nullable(),
+  lot_structure_origin: z.string().nullable(),
+  lot_structure_locked_at: z.string().nullable(),
 }).passthrough();
 
 const NullableStringArray = z.array(z.string()).nullable();
@@ -201,7 +210,7 @@ async function assembleCandidate(
   const rawTender = await singleRow(
     client,
     "tender",
-    "id,company_id,title,buyer_name,summary_description,contract_subject,project_location,city,department_code,estimated_value,procedure_type,deadline_date,submission_date,relevance_score,deleted_at,status,record_type,parent_tender_id,lot_number,lot_title,source_lot_key,lot_analysis_state",
+    "id,company_id,title,buyer_name,summary_description,contract_subject,project_location,city,department_code,estimated_value,procedure_type,deadline_date,submission_date,relevance_score,deleted_at,status,record_type,parent_tender_id,lot_number,lot_title,source_lot_key,lot_analysis_state,source,lot_structure_mode,lot_structure_origin,lot_structure_locked_at",
     candidate.tenderId,
   );
   if (!rawTender) return { status: "skipped", reason: "tender_missing" };
@@ -302,6 +311,14 @@ async function assembleCandidate(
       companyId: tender.company_id,
       recordType: tender.record_type,
       lot: lotContext,
+      autoMaterializeLots: shouldAutoMaterializeTenderLots({
+        source: tender.source,
+        status: tender.status,
+        record_type: tender.record_type,
+        lot_structure_mode: tender.lot_structure_mode,
+        lot_structure_origin: tender.lot_structure_origin,
+        lot_structure_locked_at: tender.lot_structure_locked_at,
+      }),
       existingScore: finiteNumber(tender.relevance_score),
       // Same coalesce order as the edge toScoringTender (scorer.ts:166-168).
       deadlineDate: nonBlank(tender.deadline_date) ??
@@ -378,10 +395,101 @@ function sourceLotKeyOf(lot: AnalysisWritePayload["lots"][number]): string {
   throw new Error("ANALYZE_LOT_KEY_MISSING");
 }
 
+// worker businessFields key → RPC column key → RPC evidence key (French).
+const BUSINESS_FIELD_MAPPING = [
+  ["summaryDescription", "summary_description", "description_prestations"],
+  ["contractDuration", "contract_duration", "duree_marche"],
+  ["workStartDate", "work_start_date", "date_execution"],
+  ["estimatedValue", "estimated_value", "montant"],
+] as const;
+
+/**
+ * Presence-based projection of the documentary business fields: a key is sent
+ * to the RPCs only when the field is present AND passes the strict schema
+ * again (defensive re-validation). Anything invalid — non-positive amount,
+ * blank citation, malformed date — degrades to an ABSENT key: the RPC would
+ * reject the whole sync with 23514 otherwise, and an absent key simply leaves
+ * the column untouched.
+ */
+function businessFieldProjection(fields: LotBusinessFields | null | undefined): {
+  columns: Record<string, string | number>;
+  evidence: Record<string, { citation: string }>;
+} {
+  const columns: Record<string, string | number> = {};
+  const evidence: Record<string, { citation: string }> = {};
+  if (!fields) return { columns, evidence };
+  for (const [field, column, evidenceKey] of BUSINESS_FIELD_MAPPING) {
+    const schema = LotBusinessFieldsSchema.shape[field] as z.ZodType<
+      { value: string | number; citation: string } | null
+    >;
+    const parsed = schema.safeParse(fields[field]);
+    if (!parsed.success || parsed.data === null) continue;
+    columns[column] = parsed.data.value;
+    evidence[evidenceKey] = { citation: parsed.data.citation };
+  }
+  return { columns, evidence };
+}
+
+// One canonical candidate shared by materialize_tender_lots, the input hash
+// and sync_tender_lot_analysis (which ignores the keys it does not read).
+function lotRpcCandidate(
+  lot: AnalysisWritePayload["lots"][number],
+  order: number,
+): Record<string, unknown> {
+  const business = businessFieldProjection(lot.businessFields);
+  return {
+    source_lot_key: sourceLotKeyOf(lot),
+    lot_number: lot.number,
+    lot_title: lot.title,
+    lot_order: order,
+    relevance_score: lot.relevanceScore,
+    relevance_reason: lot.relevanceReason,
+    lot_fit_status: lot.verdict,
+    ...business.columns,
+    ...(Object.keys(business.evidence).length > 0
+      ? { evidence: { business_fields: business.evidence } }
+      : {}),
+  };
+}
+
+/**
+ * Idempotence key of THIS worker run: same canonical lot payload → same hash,
+ * so the extraction-run upsert (parent, stage, hash, extractor_version) does
+ * not pile up duplicate rows on retries. It is deliberately NOT a contract
+ * with the edge hash, whose canonical candidate shape differs.
+ */
+function hashLotRpcPayload(lots: Array<Record<string, unknown>>): string {
+  return createHash("sha256").update(JSON.stringify(lots)).digest("hex");
+}
+
+// Edge parity (analyze-dce/handler.ts isLotMaterializationGuardError): these
+// server-side codes mean "a human owns the structure now"; the analysis is
+// still valid, only the materialization must yield.
+const LOT_MATERIALIZATION_GUARD_CODES = [
+  "automatic_lot_materialization_requires_nukema",
+  "lot_structure_locked_after_qualification",
+  "lot_structure_owned_by_human",
+  "manual_or_confirmed_single_tender_cannot_be_auto_structured",
+  "existing_market_structure_is_not_bot_owned",
+  "lot_structure_contains_human_decisions",
+];
+
+function errorMessageOf(error: unknown): string {
+  return typeof error === "object" && error !== null && "message" in error
+    ? String((error as { message: unknown }).message)
+    : String(error);
+}
+
+function isLotMaterializationGuardError(error: unknown): boolean {
+  const message = errorMessageOf(error);
+  return LOT_MATERIALIZATION_GUARD_CODES.some((code) => message.includes(code));
+}
+
 async function writeAnalysis(
   client: AnalyzeSupabaseClient,
   assembly: AnalyzeDossierAssembly,
   payload: AnalysisWritePayload,
+  logger?: WorkerLogger,
 ): Promise<void> {
   const guardedUpdate = await (client.from("tender") as {
     update(values: Record<string, unknown>): {
@@ -425,6 +533,41 @@ async function writeAnalysis(
     (assembly.recordType === "market" || assembly.lot !== null) &&
     payload.lots.length > 0
   ) {
+    const lotsRpcPayload = payload.lots.map((lot, order) =>
+      lotRpcCandidate(lot, order)
+    );
+    const runEvidence = {
+      queue_id: assembly.queue.queueId,
+      coverage_complete: assembly.coverage.complete,
+      documents_count: assembly.coverage.documentsCount,
+      omitted_documents: assembly.coverage.omittedDocuments,
+    };
+    // Materialize the missing lot rows only for an eligible market mother —
+    // never for a direct lot (its rows already exist under the parent).
+    if (assembly.lot === null && assembly.autoMaterializeLots) {
+      const materialized = await client.rpc("materialize_tender_lots", {
+        p_parent_tender_id: payload.tenderId,
+        p_analysis_state: analysisState,
+        p_extraction_source: "dce",
+        p_extractor_version: "analyze-dce-lots-v1",
+        p_input_hash: hashLotRpcPayload(lotsRpcPayload),
+        p_lots: lotsRpcPayload,
+        p_run_evidence: runEvidence,
+      });
+      if (materialized.error) {
+        if (!isLotMaterializationGuardError(materialized.error)) {
+          throwSupabaseError(
+            materialized.error,
+            "ANALYZE_LOT_MATERIALIZE_FAILED",
+          );
+        }
+        // Edge parity: the human structure now wins; keep the sync alone.
+        logger?.info("analyze_lot_materialization_skipped", {
+          tender_id: payload.tenderId,
+          error: errorMessageOf(materialized.error),
+        });
+      }
+    }
     const result = await client.rpc("sync_tender_lot_analysis", {
       // Direct lot: the RPC is addressed to the MARKET PARENT, which locks the
       // parent row and matches this single lot by source_lot_key/number. One
@@ -433,20 +576,8 @@ async function writeAnalysis(
         ? assembly.lot.parentTenderId
         : payload.tenderId,
       p_analysis_state: analysisState,
-      p_lots: payload.lots.map((lot) => ({
-        source_lot_key: sourceLotKeyOf(lot),
-        lot_number: lot.number,
-        lot_title: lot.title,
-        relevance_score: lot.relevanceScore,
-        relevance_reason: lot.relevanceReason,
-        lot_fit_status: lot.verdict,
-      })),
-      p_run_evidence: {
-        queue_id: assembly.queue.queueId,
-        coverage_complete: assembly.coverage.complete,
-        documents_count: assembly.coverage.documentsCount,
-        omitted_documents: assembly.coverage.omittedDocuments,
-      },
+      p_lots: lotsRpcPayload,
+      p_run_evidence: runEvidence,
     });
     checked(result, "ANALYZE_LOT_SYNC_FAILED");
   }
@@ -465,6 +596,7 @@ export type SupabaseAnalyzeStore = AnalyzeReadStore & AnalyzeApplyStore;
 
 export function createSupabaseAnalyzeStore(
   client: AnalyzeSupabaseClient,
+  options: { logger?: WorkerLogger } = {},
 ): SupabaseAnalyzeStore {
   return {
     async peekCandidates(limit, observedAt) {
@@ -517,7 +649,10 @@ export function createSupabaseAnalyzeStore(
       return data;
     },
     createResultSink(assembly) {
-      return { write: (payload) => writeAnalysis(client, assembly, payload) };
+      return {
+        write: (payload) =>
+          writeAnalysis(client, assembly, payload, options.logger),
+      };
     },
     markDone(queueId, processedAt) {
       return updateQueue(client, queueId, {

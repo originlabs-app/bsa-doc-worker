@@ -18,6 +18,7 @@ const assembly: AnalyzeDossierAssembly = {
   companyId: "company-1",
   recordType: "market",
   lot: null,
+  autoMaterializeLots: false,
   existingScore: 72,
   deadlineDate: null,
   coverage: {

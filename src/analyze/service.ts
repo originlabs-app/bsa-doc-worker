@@ -12,7 +12,11 @@ import {
   finalizeAnalysisDraft,
   type DeadlineGateStatus,
 } from "./domain.js";
-import type { FinalAnalysisUnit, FinalizedAnalysis } from "./types.js";
+import type {
+  FinalAnalysisUnit,
+  FinalizedAnalysis,
+  LotBusinessFields,
+} from "./types.js";
 
 export class AnalyzeApplySinkRequiredError extends Error {
   readonly code = "ANALYZE_APPLY_SINK_REQUIRED";
@@ -32,6 +36,7 @@ export interface AnalysisLotValues {
   verdict: FinalAnalysisUnit["verdict"] | null;
   forcedZero: boolean;
   summary: FinalAnalysisUnit["summary"] | null;
+  businessFields: LotBusinessFields | null;
 }
 
 /**
@@ -100,6 +105,7 @@ function lotValues(unit: FinalAnalysisUnit): AnalysisLotValues | null {
     verdict: unit.verdict,
     forcedZero: unit.forcedZero,
     summary: unit.summary,
+    businessFields: unit.businessFields ?? null,
   };
 }
 
@@ -226,6 +232,7 @@ export function buildAnalysisWritePayload(input: {
         verdict: matchedUnit?.verdict ?? null,
         forcedZero: matchedUnit?.forcedZero ?? false,
         summary: matchedUnit?.summary ?? null,
+        businessFields: matchedUnit?.businessFields ?? null,
       }]
       : input.result.units.flatMap((unit) => {
         const lot = lotValues(unit);

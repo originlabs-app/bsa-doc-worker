@@ -5,7 +5,10 @@ import {
   applyDeadlineGate,
   computeFinalScoreFromCriteria,
   finalizeAnalysisDraft,
+  LotBusinessFieldsSchema,
+  shouldAutoMaterializeTenderLots,
   type AgentAnalysisDraft,
+  type LotMaterializationTender,
   type CompanyProfile,
   type FinalizedAnalysis,
   type MandatoryQualification,
@@ -296,5 +299,119 @@ describe("applyDeadlineGate", () => {
       expect(unit.summary.watchpoints.filter((entry) => entry === warning))
         .toHaveLength(1);
     }
+  });
+});
+
+describe("shouldAutoMaterializeTenderLots", () => {
+  const eligible: LotMaterializationTender = {
+    source: "Nukema API",
+    status: "opportunity",
+    record_type: "market",
+    lot_structure_mode: "multi",
+    lot_structure_origin: "nukema_bot",
+    lot_structure_locked_at: null,
+  };
+
+  // Exact truth table of the edge guard, market branch.
+  const cases: Array<{
+    label: string;
+    tender: LotMaterializationTender;
+    expected: boolean;
+  }> = [
+    { label: "eligible nukema multi market", tender: eligible, expected: true },
+    {
+      label: "non-nukema source",
+      tender: { ...eligible, source: "manual" },
+      expected: false,
+    },
+    {
+      label: "null source",
+      tender: { ...eligible, source: null },
+      expected: false,
+    },
+    {
+      label: "qualified status",
+      tender: { ...eligible, status: "qualified" },
+      expected: false,
+    },
+    {
+      label: "locked structure",
+      tender: { ...eligible, lot_structure_locked_at: "2026-07-20T10:00:00Z" },
+      expected: false,
+    },
+    {
+      label: "standalone record (worker scope excludes the edge standalone branch)",
+      tender: { ...eligible, record_type: "standalone" },
+      expected: false,
+    },
+    {
+      label: "direct lot record",
+      tender: { ...eligible, record_type: "lot" },
+      expected: false,
+    },
+    {
+      label: "single-lot structure",
+      tender: { ...eligible, lot_structure_mode: "single" },
+      expected: false,
+    },
+    {
+      label: "null structure mode",
+      tender: { ...eligible, lot_structure_mode: null },
+      expected: false,
+    },
+    {
+      label: "human-owned structure",
+      tender: { ...eligible, lot_structure_origin: "human" },
+      expected: false,
+    },
+    {
+      label: "null structure origin",
+      tender: { ...eligible, lot_structure_origin: null },
+      expected: false,
+    },
+  ];
+
+  for (const entry of cases) {
+    it(entry.label, () => {
+      expect(shouldAutoMaterializeTenderLots(entry.tender)).toBe(entry.expected);
+    });
+  }
+});
+
+describe("LotBusinessFieldsSchema", () => {
+  const valid = {
+    summaryDescription: { value: "Gros œuvre", citation: "Le lot comprend le gros œuvre" },
+    contractDuration: { value: "12 mois", citation: "Durée du marché : 12 mois" },
+    workStartDate: { value: "2026-09-01", citation: "Démarrage le 1er septembre 2026" },
+    estimatedValue: { value: 250_000, citation: "Montant estimé : 250 000 € HT" },
+  };
+
+  it("accepts a fully cited set of business fields", () => {
+    expect(LotBusinessFieldsSchema.parse(valid)).toEqual(valid);
+  });
+
+  it("accepts null fields for values absent from the documents", () => {
+    const empty = {
+      summaryDescription: null,
+      contractDuration: null,
+      workStartDate: null,
+      estimatedValue: null,
+    };
+    expect(LotBusinessFieldsSchema.parse(empty)).toEqual(empty);
+  });
+
+  it("rejects a blank citation, a malformed date and a non-positive amount", () => {
+    expect(LotBusinessFieldsSchema.safeParse({
+      ...valid,
+      summaryDescription: { value: "Gros œuvre", citation: "   " },
+    }).success).toBe(false);
+    expect(LotBusinessFieldsSchema.safeParse({
+      ...valid,
+      workStartDate: { value: "01/09/2026", citation: "Démarrage" },
+    }).success).toBe(false);
+    expect(LotBusinessFieldsSchema.safeParse({
+      ...valid,
+      estimatedValue: { value: 0, citation: "Montant" },
+    }).success).toBe(false);
   });
 });
