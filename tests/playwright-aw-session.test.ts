@@ -12,9 +12,11 @@ import {
   clickChoixDceIdentificationIfPrompted,
   followAnonymousWithdrawalLinkIfPresented,
   locateAwLotSelectionForm,
+  solveAwCaptchaOnce,
   waitForCaptchaIfPresent,
 } from "../src/adapters/playwright-aw-session.js";
 import type { RecoveryRequest } from "../src/contracts.js";
+import type { LogRecord, WorkerLogger } from "../src/logger.js";
 
 vi.mock("playwright-core", () => ({
   chromium: { connectOverCDP: vi.fn() },
@@ -219,12 +221,25 @@ function fakeChoixDcePage(options: {
   textTargets?: Record<string, TextControlState>;
   captcha?: { present: boolean; value?: string; solves?: boolean };
   anonymousLink?: { visible: boolean };
+  cdpResult?: { found?: boolean; solved?: boolean; error?: string };
 }) {
   const clicked: string[] = [];
+  const cdpSend = vi.fn(async (method: string) => {
+    expect(method).toBe("Browserless.solveCaptcha");
+    return options.cdpResult;
+  });
+  const cdpDetach = vi.fn(async () => undefined);
   const waitForFunction = vi.fn(async () => {
     if (options.captcha?.solves !== true) throw new Error("fixture timeout");
   });
   const page = {
+    ...(options.cdpResult
+      ? {
+          context: () => ({
+            newCDPSession: async () => ({ send: cdpSend, detach: cdpDetach }),
+          }),
+        }
+      : {}),
     locator: (selector: string) => ({
       first: () => ({
         count: async () =>
@@ -264,7 +279,17 @@ function fakeChoixDcePage(options: {
     waitForNavigation: vi.fn(async () => null),
     waitForFunction,
   };
-  return { page, clicked, waitForFunction };
+  return { page, clicked, waitForFunction, cdpSend, cdpDetach };
+}
+
+function captureLogger() {
+  const events: Array<{ event: string; record: LogRecord }> = [];
+  const logger: WorkerLogger = {
+    info: (event, record) => {
+      events.push({ event, record });
+    },
+  };
+  return { logger, events };
 }
 
 describe("clickChoixDceIdentificationIfPrompted", () => {
@@ -607,5 +632,181 @@ describe("waitForCaptchaIfPresent", () => {
     expect(budget.unitsCommitted).toBe(
       AW_CAPTCHA_SOLVE_UNIT_BUDGET_PER_ATTEMPT,
     );
+  });
+});
+
+describe("solveAwCaptchaOnce", () => {
+  function cdpPage(options: {
+    result?: { found?: boolean; solved?: boolean; error?: string };
+    sendError?: Error;
+    hangs?: boolean;
+  }) {
+    const send = vi.fn(async (method: string) => {
+      expect(method).toBe("Browserless.solveCaptcha");
+      if (options.sendError) throw options.sendError;
+      if (options.hangs) return new Promise(() => undefined);
+      return options.result;
+    });
+    const detach = vi.fn(async () => undefined);
+    const page = {
+      context: () => ({
+        newCDPSession: async () => ({ send, detach }),
+      }),
+    };
+    return { page, send, detach };
+  }
+
+  it("reports a Browserless solve success", async () => {
+    const { page, send, detach } = cdpPage({ result: { solved: true } });
+
+    await expect(solveAwCaptchaOnce(page as never, 1_000)).resolves.toEqual({
+      solved: true,
+      detail: "browserless_solved",
+    });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(detach).toHaveBeenCalled();
+  });
+
+  it("reports a wall Browserless does not recognize as a CAPTCHA", async () => {
+    const { page } = cdpPage({ result: { found: false, solved: false } });
+
+    await expect(solveAwCaptchaOnce(page as never, 1_000)).resolves.toEqual({
+      solved: false,
+      detail: "captcha_not_recognized_by_browserless",
+    });
+  });
+
+  it("surfaces the Browserless solver error text", async () => {
+    const { page } = cdpPage({
+      result: { found: true, solved: false, error: "unsupported captcha type" },
+    });
+
+    const verdict = await solveAwCaptchaOnce(page as never, 1_000);
+
+    expect(verdict.solved).toBe(false);
+    expect(verdict.detail).toContain("unsupported captcha type");
+  });
+
+  it("bounds a hanging solve command with a timeout and never throws", async () => {
+    const { page, detach } = cdpPage({ hangs: true });
+
+    const verdict = await solveAwCaptchaOnce(page as never, 50);
+
+    expect(verdict.solved).toBe(false);
+    expect(verdict.detail).toContain("timeout");
+    expect(detach).toHaveBeenCalled();
+  });
+
+  it("degrades to a diagnostic when the CDP session is unavailable", async () => {
+    const page = {};
+
+    const verdict = await solveAwCaptchaOnce(page as never, 1_000);
+
+    expect(verdict.solved).toBe(false);
+    expect(verdict.detail).toContain("cdp_unavailable");
+  });
+});
+
+describe("waitForCaptchaIfPresent diagnostics", () => {
+  it("logs detection then solved, with exactly one solve command", async () => {
+    const budget = new AwCaptchaSolveBudget();
+    const { logger, events } = captureLogger();
+    const { page, cdpSend } = fakeChoixDcePage({
+      captcha: { present: true, solves: true },
+      cdpResult: { solved: true },
+    });
+
+    await waitForCaptchaIfPresent(page as never, 1_000, budget, logger);
+
+    expect(cdpSend).toHaveBeenCalledTimes(1);
+    expect(events.map(({ event }) => event)).toEqual([
+      "recovery_aw_captcha_detected",
+      "recovery_aw_captcha_solved",
+    ]);
+    expect(events[0]?.record).toMatchObject({ wall: "aw_image_captcha" });
+  });
+
+  it("logs an unsolved CAPTCHA with the solver verdict and fails with detail", async () => {
+    const budget = new AwCaptchaSolveBudget();
+    const { logger, events } = captureLogger();
+    const { page } = fakeChoixDcePage({
+      captcha: { present: true, solves: false },
+      cdpResult: { found: false, solved: false },
+    });
+
+    const error = await waitForCaptchaIfPresent(
+      page as never,
+      1_000,
+      budget,
+      logger,
+    ).catch((caught: unknown) => caught as AwAdapterError);
+
+    expect(error).toMatchObject({ reasonCode: "CAPTCHA_UNSOLVED" });
+    expect(String((error as Error).message)).toContain(
+      "captcha_not_recognized_by_browserless",
+    );
+    expect(events.map(({ event }) => event)).toEqual([
+      "recovery_aw_captcha_detected",
+      "recovery_aw_captcha_unsolved",
+    ]);
+    expect(events[1]?.record).toMatchObject({
+      detail: "captcha_not_recognized_by_browserless",
+    });
+  });
+
+  it("logs an exhausted solve budget as unsolved before failing", async () => {
+    const budget = new AwCaptchaSolveBudget();
+    budget.commitSolve();
+    const { logger, events } = captureLogger();
+    const { page, cdpSend } = fakeChoixDcePage({
+      captcha: { present: true, solves: true },
+      cdpResult: { solved: true },
+    });
+
+    await expect(
+      waitForCaptchaIfPresent(page as never, 1_000, budget, logger),
+    ).rejects.toMatchObject({ reasonCode: "CAPTCHA_UNSOLVED" });
+    expect(cdpSend).not.toHaveBeenCalled();
+    expect(events.map(({ event }) => event)).toEqual([
+      "recovery_aw_captcha_detected",
+      "recovery_aw_captcha_unsolved",
+    ]);
+    expect(events[1]?.record).toMatchObject({
+      detail: "solve_budget_exhausted",
+    });
+  });
+});
+
+describe("PlaywrightAwBrowserSession failure diagnostics", () => {
+  it("names the failing step and keeps the original error text", async () => {
+    const flow = fakeAwDiscoverFlow("avertissement");
+    flow.browser.contexts()[0]!.pages()[0]!.goto.mockRejectedValueOnce(
+      new Error("net::ERR_TIMED_OUT at https://example.test"),
+    );
+    vi.mocked(chromium.connectOverCDP).mockResolvedValue(flow.browser as never);
+    const session = new PlaywrightAwBrowserSession({
+      browserlessToken: "fixture-token",
+      awPortalEmail: "operator@example.test",
+      awPortalPassword: "fixture-password",
+      timeoutMs: 1_000,
+    });
+
+    const error = await session
+      .discover({
+        jobId: "fixture-job",
+        tenderId: "fixture-tender",
+        sourceField: "link_to_buyer_profile",
+        providedUrl:
+          "https://www.marches-publics.info/mpiaws/index.cfm?fuseaction=dematEnt.login&type=DCE&IDM=1848459",
+        requestedLots: { kind: "all" },
+      })
+      .catch((caught: unknown) => caught as AwAdapterError);
+
+    expect(error).toMatchObject({
+      reasonCode: "ADAPTER_FAILURE",
+      retryable: true,
+    });
+    expect(String((error as Error).message)).toContain("at goto");
+    expect(String((error as Error).message)).toContain("net::ERR_TIMED_OUT");
   });
 });

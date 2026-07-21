@@ -136,6 +136,26 @@ function increment(report: RecoverySweepReport, status: RecoveryAttemptStatus): 
   else report.nError += 1;
 }
 
+// Persisted next to the search evidence so a 'blocked' or 'error' attempt in
+// tender_dce_recovery_attempt is never mute about what actually failed.
+function failureEvidence(error: unknown): Record<string, unknown> {
+  const shaped = error as { reasonCode?: unknown; retryable?: unknown };
+  return {
+    reason_code:
+      error && typeof error === "object" && "reasonCode" in error
+        ? String(shaped.reasonCode)
+        : null,
+    retryable:
+      error && typeof error === "object" && "retryable" in error
+        ? Boolean(shaped.retryable)
+        : null,
+    message: (error instanceof Error ? error.message : String(error)).slice(
+      0,
+      500,
+    ),
+  };
+}
+
 function errorReason(error: unknown): "blocked" | "error" {
   if (!error || typeof error !== "object" || !("reasonCode" in error)) {
     return "error";
@@ -333,6 +353,7 @@ export async function runRecoverySweep(
       const status = error instanceof RecoveryTooLargeError
         ? "too_large"
         : errorReason(error);
+      const failure = failureEvidence(error);
       increment(report, status);
       await finalize(
         dependencies.store,
@@ -340,13 +361,15 @@ export async function runRecoverySweep(
         status,
         match.candidate.portal,
         status === "too_large" ? match.level : status,
-        evidence,
+        { ...evidence, failure },
       );
       dependencies.logger?.info("recovery_attempt_completed", {
         tender_id: target.tenderId,
         portal: match.candidate.portal,
         decision: status === "too_large" ? match.level : status,
         status,
+        reason_code: failure.reason_code,
+        failure_message: failure.message,
         units: dependencies.captchaUnits?.() ?? 0,
       });
     }
