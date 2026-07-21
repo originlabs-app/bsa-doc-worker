@@ -420,3 +420,16 @@ RECOVERY_SEARCH_PROBE_PASS
 
 - Aucun push, merge, deploy, sink, migration ou CLI modifié.
 - RECOVERY-SEARCH GELÉ au `36bb0b1`.
+
+--- LIVRAISON FABLE 2 : DOCTRINE DE LECTURE AO (branche worker docs/lecture-ao-doctrine) ---
+docs/lecture-ao.md sur branche docs/lecture-ao-doctrine (base = main worker
+541116e, déjà PR #5 materialize+business fields mergée par la boucle).
+Contenu : entonnoir 2 passes (go/no-go puis profonde), encadrés par pièce
+(manuel Paul + méthode pro web), éliminatoires précoces, fiche de synthèse
+1 page (livrable), règles d'honnêteté, implémentation cascade modèles
+(reader flash-lite ciblé + fallback 3.5 + fix troncature ; terra analyste
+partout), leçons d'exploitation à enrichir au matin.
+POUR LA BOUCLE / MISSION DE JOUR : câbler cette doctrine dans les prompts
+du worker (readerRoleInstruction + system analyze) = la demande Pierre
+« l'appliquer et l'améliorer, en skill ou prompt system dans le SDK ».
+Merge de la branche docs sans risque (doc seule, zéro code).
