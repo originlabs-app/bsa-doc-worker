@@ -8,12 +8,19 @@ import {
 export const AnalyzeModeSchema = z.enum(["off", "shadow", "apply"]);
 export type AnalyzeMode = z.infer<typeof AnalyzeModeSchema>;
 
+export const AnalyzeRecordTypeSchema = z.enum(["standalone", "market", "lot"]);
+export type AnalyzeRecordType = z.infer<typeof AnalyzeRecordTypeSchema>;
+
+export const DEFAULT_ANALYZE_RECORD_TYPES: readonly AnalyzeRecordType[] =
+  ["standalone"];
+
 export interface AnalyzeConfig {
   mode: AnalyzeMode;
   model: string;
   maxSteps: number;
   maxOutputTokens: number;
   deadlineMinDays: number;
+  recordTypes: AnalyzeRecordType[];
   openRouterApiKey: string | undefined;
 }
 
@@ -25,6 +32,26 @@ const DEFAULT_ANALYZE_MODEL = "openai/gpt-5.6-terra";
 function nonEmpty(value: string | undefined): string | undefined {
   const normalized = value?.trim();
   return normalized ? normalized : undefined;
+}
+
+function parseRecordTypes(
+  rawValue: string | undefined,
+): AnalyzeRecordType[] {
+  if (rawValue === undefined || rawValue.trim() === "") {
+    return [...DEFAULT_ANALYZE_RECORD_TYPES];
+  }
+  const values = rawValue
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => value !== "");
+  const parsed = z.array(AnalyzeRecordTypeSchema).nonempty().safeParse(values);
+  if (!parsed.success) {
+    throw new Error(
+      "ANALYZE_RECORD_TYPES must be a comma-separated list of " +
+        AnalyzeRecordTypeSchema.options.join(", "),
+    );
+  }
+  return [...new Set(parsed.data)];
 }
 
 function boundedInteger(input: {
@@ -73,6 +100,7 @@ export function loadAnalyzeConfig(
       defaultValue: DEFAULT_DEADLINE_MIN_DAYS,
       maximum: MAX_DEADLINE_MIN_DAYS,
     }),
+    recordTypes: parseRecordTypes(env.ANALYZE_RECORD_TYPES),
     openRouterApiKey,
   };
 }
