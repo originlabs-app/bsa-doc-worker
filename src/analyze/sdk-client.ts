@@ -68,6 +68,8 @@ function buildSystemPrompt(repair: boolean): string {
     "Tu identifies les faits utiles aux règles rédhibitoires, mais seul le code décide du blocage.",
     "La synthèse mère reste courte. Chaque lot reçoit une synthèse riche couvrant périmètre, prestations, exigences, qualifications, montants et vigilances.",
     "Chaque affirmation importante cite un document extrait.",
+    "Pour chaque lot, tu remplis businessFields avec quatre champs métier : summaryDescription (description des prestations), contractDuration (durée du marché), workStartDate (date de démarrage au format AAAA-MM-JJ), estimatedValue (montant estimé en euros, nombre strictement positif).",
+    "Chaque champ métier présent exige une citation exacte, copiée mot pour mot du document source. Sans passage exact trouvé dans les documents, le champ vaut null : tu n'inventes jamais une valeur ni une citation.",
   ];
   if (repair) {
     lines.push(

@@ -75,6 +75,7 @@ function fixtureClient(input: {
   documents?: unknown[];
   text?: string;
   downloadError?: unknown;
+  rpcErrors?: Record<string, unknown>;
 }) {
   const operations = new Map<string, QueryOperation[]>();
   const updates: Array<{ table: string; values: unknown }> = [];
@@ -99,6 +100,9 @@ function fixtureClient(input: {
     return query;
   });
   const rpc = vi.fn(async (name: string) => {
+    if (input.rpcErrors && name in input.rpcErrors) {
+      return { data: null, error: input.rpcErrors[name] };
+    }
     if (name === "list_tender_analysis_documents") {
       return { data: input.documents ?? [], error: null };
     }
@@ -144,6 +148,10 @@ const tender = {
   lot_title: null,
   source_lot_key: null,
   lot_analysis_state: null,
+  source: "Nukema API",
+  lot_structure_mode: "multi",
+  lot_structure_origin: "nukema_bot",
+  lot_structure_locked_at: null,
 };
 
 const lotTender = {
@@ -446,6 +454,7 @@ describe("Supabase ANALYZE apply contract", () => {
           amounts: [],
           watchpoints: [],
         },
+        businessFields: null,
       }],
       ledger: {
         tenderId: "tender-1",
@@ -462,6 +471,7 @@ describe("Supabase ANALYZE apply contract", () => {
       companyId: "company-1",
       recordType: "market",
       lot: null,
+      autoMaterializeLots: false,
       existingScore: 72,
       deadlineDate: null,
       dossier: {
@@ -537,6 +547,7 @@ describe("Supabase ANALYZE apply contract", () => {
         title: "Gros œuvre",
         sourceLotKey,
       },
+      autoMaterializeLots: false,
       existingScore: 72,
       deadlineDate: null,
       dossier: {
@@ -582,6 +593,7 @@ describe("Supabase ANALYZE apply contract", () => {
           amounts: [],
           watchpoints: [],
         },
+        businessFields: null,
       }],
       ledger: {
         tenderId: "lot-1",
@@ -880,5 +892,328 @@ describe("Supabase ANALYZE shadow integration", () => {
       "analyze_shadow_comparison",
       expect.objectContaining({ shadow_score: 40, deadline_gate: "applied" }),
     );
+  });
+});
+
+describe("Supabase ANALYZE lot materialization (LOT C)", () => {
+  const businessFields = {
+    summaryDescription: {
+      value: "Travaux de gros œuvre",
+      citation: "Le lot 1 comprend les travaux de gros œuvre",
+    },
+    contractDuration: {
+      value: "12 mois",
+      citation: "Durée du marché : 12 mois",
+    },
+    workStartDate: {
+      value: "2026-09-01",
+      citation: "Démarrage prévu le 1er septembre 2026",
+    },
+    estimatedValue: {
+      value: 250_000,
+      citation: "Montant estimé : 250 000 € HT",
+    },
+  };
+
+  function marketAssembly(autoMaterializeLots: boolean) {
+    return {
+      queue: candidate,
+      companyId: "company-1",
+      recordType: "market",
+      lot: null,
+      autoMaterializeLots,
+      existingScore: 72,
+      deadlineDate: null,
+      dossier: {
+        tender: {
+          id: "tender-1",
+          title: "Marché",
+          buyerName: null,
+          description: null,
+          location: null,
+          estimatedAmount: null,
+          procedureType: null,
+        },
+        company: {},
+        mandatoryQualifications: [],
+        documents: [],
+      },
+      coverage: {
+        complete: true,
+        documentsCount: 1,
+        omittedDocuments: 0,
+        totalCharacters: 10,
+      },
+    };
+  }
+
+  function marketPayload(
+    fields: typeof businessFields | null,
+  ): AnalysisWritePayload {
+    return {
+      tenderId: "tender-1",
+      tenderValues: { relevance_score: 100 },
+      lots: [{
+        sourceLotKey: null,
+        number: "1",
+        title: "Gros œuvre",
+        relevanceScore: 100,
+        relevanceReason: "Excellent fit",
+        verdict: "recommended",
+        forcedZero: false,
+        summary: {
+          scope: "Gros œuvre",
+          services: [],
+          requirements: [],
+          qualifications: [],
+          amounts: [],
+          watchpoints: [],
+        },
+        businessFields: fields,
+      }],
+      ledger: {
+        tenderId: "tender-1",
+        step: "dce_scoring",
+        model: "model",
+        costUsd: 0.01,
+        metadata: {},
+      },
+    };
+  }
+
+  function rpcCall(
+    fixture: ReturnType<typeof fixtureClient>,
+    name: string,
+  ): Record<string, unknown> | undefined {
+    const calls = fixture.rpc.mock.calls as unknown as Array<
+      [string, Record<string, unknown> | undefined]
+    >;
+    return calls.find(([called]) => called === name)?.[1];
+  }
+
+  it("materializes an eligible market mother before syncing its lots", async () => {
+    const fixture = fixtureClient({ tender, company });
+    const store = createSupabaseAnalyzeStore(fixture.client);
+    await store.createResultSink(marketAssembly(true))
+      .write(marketPayload(businessFields));
+
+    const names = fixture.rpc.mock.calls.map(([name]) => name);
+    expect(names.indexOf("materialize_tender_lots")).toBeGreaterThanOrEqual(0);
+    expect(names.indexOf("materialize_tender_lots"))
+      .toBeLessThan(names.indexOf("sync_tender_lot_analysis"));
+
+    const materialize = rpcCall(fixture, "materialize_tender_lots");
+    expect(materialize).toMatchObject({
+      p_parent_tender_id: "tender-1",
+      p_analysis_state: "documentary_complete",
+      p_extraction_source: "dce",
+      p_extractor_version: "analyze-dce-lots-v1",
+      p_run_evidence: expect.objectContaining({ queue_id: "queue-1" }),
+    });
+    expect(materialize?.p_input_hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(materialize?.p_lots).toEqual([expect.objectContaining({
+      source_lot_key: "number:1",
+      lot_number: "1",
+      lot_title: "Gros œuvre",
+      lot_order: 0,
+      lot_fit_status: "recommended",
+    })]);
+    // The sync receives the exact same canonical lot payload.
+    expect(rpcCall(fixture, "sync_tender_lot_analysis")?.p_lots)
+      .toEqual(materialize?.p_lots);
+  });
+
+  it("writes the four cited business fields with presence-based evidence", async () => {
+    const fixture = fixtureClient({ tender, company });
+    const store = createSupabaseAnalyzeStore(fixture.client);
+    await store.createResultSink(marketAssembly(true))
+      .write(marketPayload(businessFields));
+
+    const [lot] = rpcCall(fixture, "sync_tender_lot_analysis")
+      ?.p_lots as Array<Record<string, unknown>>;
+    expect(lot).toMatchObject({
+      summary_description: "Travaux de gros œuvre",
+      contract_duration: "12 mois",
+      work_start_date: "2026-09-01",
+      estimated_value: 250_000,
+      evidence: {
+        business_fields: {
+          description_prestations: {
+            citation: "Le lot 1 comprend les travaux de gros œuvre",
+          },
+          duree_marche: { citation: "Durée du marché : 12 mois" },
+          date_execution: { citation: "Démarrage prévu le 1er septembre 2026" },
+          montant: { citation: "Montant estimé : 250 000 € HT" },
+        },
+      },
+    });
+  });
+
+  it("omits every business key when the lot carries no business fields", async () => {
+    const fixture = fixtureClient({ tender, company });
+    const store = createSupabaseAnalyzeStore(fixture.client);
+    await store.createResultSink(marketAssembly(true))
+      .write(marketPayload(null));
+
+    const [lot] = rpcCall(fixture, "sync_tender_lot_analysis")
+      ?.p_lots as Array<Record<string, unknown>>;
+    expect(lot).not.toHaveProperty("summary_description");
+    expect(lot).not.toHaveProperty("contract_duration");
+    expect(lot).not.toHaveProperty("work_start_date");
+    expect(lot).not.toHaveProperty("estimated_value");
+    expect(lot).not.toHaveProperty("evidence");
+  });
+
+  it("degrades every invalid business field to an absent key, never a 23514", async () => {
+    const fixture = fixtureClient({ tender, company });
+    const store = createSupabaseAnalyzeStore(fixture.client);
+    await store.createResultSink(marketAssembly(true)).write(marketPayload({
+      summaryDescription: businessFields.summaryDescription,
+      contractDuration: { value: "12 mois", citation: "   " },
+      workStartDate: { value: "01/09/2026", citation: "Démarrage" },
+      estimatedValue: { value: -5, citation: "Montant" },
+    }));
+
+    const [lot] = rpcCall(fixture, "sync_tender_lot_analysis")
+      ?.p_lots as Array<Record<string, unknown>>;
+    expect(lot).toMatchObject({
+      summary_description: "Travaux de gros œuvre",
+      evidence: {
+        business_fields: {
+          description_prestations: {
+            citation: "Le lot 1 comprend les travaux de gros œuvre",
+          },
+        },
+      },
+    });
+    expect(lot).not.toHaveProperty("contract_duration");
+    expect(lot).not.toHaveProperty("work_start_date");
+    expect(lot).not.toHaveProperty("estimated_value");
+    const evidence = (lot?.evidence as {
+      business_fields: Record<string, unknown>;
+    }).business_fields;
+    expect(Object.keys(evidence)).toEqual(["description_prestations"]);
+  });
+
+  it("hashes the canonical payload deterministically across identical runs", async () => {
+    const first = fixtureClient({ tender, company });
+    const second = fixtureClient({ tender, company });
+    await createSupabaseAnalyzeStore(first.client)
+      .createResultSink(marketAssembly(true))
+      .write(marketPayload(businessFields));
+    await createSupabaseAnalyzeStore(second.client)
+      .createResultSink(marketAssembly(true))
+      .write(marketPayload(businessFields));
+
+    expect(rpcCall(first, "materialize_tender_lots")?.p_input_hash)
+      .toBe(rpcCall(second, "materialize_tender_lots")?.p_input_hash);
+  });
+
+  it("keeps the sync alone when the mother is not eligible", async () => {
+    const fixture = fixtureClient({ tender, company });
+    const store = createSupabaseAnalyzeStore(fixture.client);
+    await store.createResultSink(marketAssembly(false))
+      .write(marketPayload(businessFields));
+
+    const names = fixture.rpc.mock.calls.map(([name]) => name);
+    expect(names).not.toContain("materialize_tender_lots");
+    expect(names).toContain("sync_tender_lot_analysis");
+  });
+
+  it("never materializes for a direct lot analysis", async () => {
+    const fixture = fixtureClient({ tender: lotTender, company });
+    const store = createSupabaseAnalyzeStore(fixture.client);
+    await store.createResultSink({
+      ...marketAssembly(true),
+      queue: { queueId: "queue-1", tenderId: "lot-1", attempts: 1 },
+      recordType: "lot",
+      lot: {
+        parentTenderId: "parent-1",
+        number: "1",
+        title: "Gros œuvre",
+        sourceLotKey: "boamp:lot-1",
+      },
+    }).write({ ...marketPayload(businessFields), tenderId: "lot-1" });
+
+    const names = fixture.rpc.mock.calls.map(([name]) => name);
+    expect(names).not.toContain("materialize_tender_lots");
+    expect(names).toContain("sync_tender_lot_analysis");
+  });
+
+  it("falls back to the sync alone on a structure-guard error", async () => {
+    const fixture = fixtureClient({
+      tender,
+      company,
+      rpcErrors: {
+        materialize_tender_lots: {
+          message: "lot_structure_owned_by_human",
+          code: "P0001",
+        },
+      },
+    });
+    const logger = { info: vi.fn() };
+    const store = createSupabaseAnalyzeStore(fixture.client, { logger });
+    await store.createResultSink(marketAssembly(true))
+      .write(marketPayload(businessFields));
+
+    const names = fixture.rpc.mock.calls.map(([name]) => name);
+    expect(names).toContain("materialize_tender_lots");
+    expect(names).toContain("sync_tender_lot_analysis");
+    expect(logger.info).toHaveBeenCalledWith(
+      "analyze_lot_materialization_skipped",
+      expect.objectContaining({
+        tender_id: "tender-1",
+        error: expect.stringContaining("lot_structure_owned_by_human"),
+      }),
+    );
+  });
+
+  it("fails closed on a non-guard materialization error", async () => {
+    const fixture = fixtureClient({
+      tender,
+      company,
+      rpcErrors: {
+        materialize_tender_lots: {
+          message: "connection reset",
+          code: "08006",
+        },
+      },
+    });
+    const store = createSupabaseAnalyzeStore(fixture.client);
+
+    await expect(
+      store.createResultSink(marketAssembly(true))
+        .write(marketPayload(businessFields)),
+    ).rejects.toThrow("ANALYZE_LOT_MATERIALIZE_FAILED");
+    expect(fixture.rpc.mock.calls.map(([name]) => name))
+      .not.toContain("sync_tender_lot_analysis");
+  });
+
+  it("computes the eligibility flag from the tender row at assembly time", async () => {
+    const eligibleFixture = fixtureClient({
+      tender,
+      company,
+      documents: [document],
+    });
+    await expect(
+      createSupabaseAnalyzeStore(eligibleFixture.client)
+        .assembleCandidate(candidate),
+    ).resolves.toMatchObject({
+      status: "ready",
+      assembly: { autoMaterializeLots: true },
+    });
+
+    const lockedFixture = fixtureClient({
+      tender: { ...tender, lot_structure_locked_at: "2026-07-20T10:00:00Z" },
+      company,
+      documents: [document],
+    });
+    await expect(
+      createSupabaseAnalyzeStore(lockedFixture.client)
+        .assembleCandidate(candidate),
+    ).resolves.toMatchObject({
+      status: "ready",
+      assembly: { autoMaterializeLots: false },
+    });
   });
 });

@@ -26,6 +26,12 @@ export interface AnalyzeDossierAssembly {
   recordType: string | null;
   /** Non-null exactly when record_type = 'lot' (direct lot analysis). */
   lot: AnalyzeLotContext | null;
+  /**
+   * Result of shouldAutoMaterializeTenderLots on the tender read at assembly
+   * time (edge parity). The materialize RPC re-checks the same guards
+   * server-side, so a human takeover between read and write still wins.
+   */
+  autoMaterializeLots: boolean;
   existingScore: number | null;
   deadlineDate: string | null;
   dossier: AnalyzeDossierInput;

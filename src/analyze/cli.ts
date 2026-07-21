@@ -83,6 +83,7 @@ function createDependencies(
     serviceRoleKey: config.supabaseServiceRoleKey,
   });
   const store = createSupabaseAnalyzeStore(supabase, {
+    logger,
     recordTypes: config.recordTypes,
   });
   const learningStore = createSupabaseLearningMemoryStore(

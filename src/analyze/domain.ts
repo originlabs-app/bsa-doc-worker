@@ -11,6 +11,31 @@ import type {
 
 export type DeadlineGateStatus = "passed" | "applied" | "unknown";
 
+export interface LotMaterializationTender {
+  source: string | null;
+  status: string;
+  record_type: string | null;
+  lot_structure_mode: string | null;
+  lot_structure_origin: string | null;
+  lot_structure_locked_at: string | null;
+}
+
+// Exact copy of the edge guard (analyze-dce/handler.ts
+// shouldAutoMaterializeTenderLots), restricted to its market branch: the
+// worker only auto-materializes lots under an analyzed market mother. The
+// standalone→undetermined edge branch is deliberately out of scope here.
+export function shouldAutoMaterializeTenderLots(
+  tender: LotMaterializationTender,
+): boolean {
+  if (tender.source !== "Nukema API" || tender.status !== "opportunity") {
+    return false;
+  }
+  if (tender.lot_structure_locked_at) return false;
+  return tender.record_type === "market" &&
+    tender.lot_structure_mode === "multi" &&
+    tender.lot_structure_origin === "nukema_bot";
+}
+
 const DEADLINE_GATE_CAP = 40;
 
 function unique(values: string[]): string[] {

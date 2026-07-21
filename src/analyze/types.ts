@@ -30,6 +30,32 @@ export const AnalysisUnitSchema = z.discriminatedUnion("kind", [
   }).strict(),
 ]);
 
+// Documentary business fields per lot. Presence-based semantics all the way to
+// the sync RPC: a null field means "not found in the documents" and the
+// corresponding column is simply never touched. Every present field MUST carry
+// a verbatim citation from an analyzed document (the RPC raises 23514 without
+// one), so a value can never be asserted without its proof.
+const businessCitation = z.string().trim().min(1).max(1_000);
+export const LotBusinessFieldsSchema = z.object({
+  summaryDescription: z.object({
+    value: z.string().trim().min(1).max(2_000),
+    citation: businessCitation,
+  }).strict().nullable(),
+  contractDuration: z.object({
+    value: z.string().trim().min(1).max(500),
+    citation: businessCitation,
+  }).strict().nullable(),
+  workStartDate: z.object({
+    value: z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/),
+    citation: businessCitation,
+  }).strict().nullable(),
+  estimatedValue: z.object({
+    value: z.number().finite().positive(),
+    citation: businessCitation,
+  }).strict().nullable(),
+}).strict();
+export type LotBusinessFields = z.infer<typeof LotBusinessFieldsSchema>;
+
 export const RichSummarySchema = z.object({
   scope: shortText,
   services: z.array(shortText).max(50),
@@ -46,6 +72,7 @@ export const AnalysisUnitDraftSchema = z.object({
   criteria: CriterionScoresSchema,
   unknownCriteria: z.array(CriterionKeySchema).max(5),
   summary: RichSummarySchema,
+  businessFields: LotBusinessFieldsSchema.nullable().optional(),
   requiredQualifications: z.array(z.object({
     label: z.string().trim().min(1).max(500),
     sourceDocumentId: z.string().trim().min(1).max(200),
