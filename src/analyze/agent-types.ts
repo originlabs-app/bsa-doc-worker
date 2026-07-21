@@ -65,12 +65,45 @@ export interface AnalyzeUsage {
   totalTokens: number;
 }
 
+/** One lot of the market roster, as enumerated by the framing call. */
+export interface AnalyzeRosterLot {
+  number: string;
+  title: string;
+}
+
+/**
+ * LOT H — chunked analysis of large allotted markets. A mission narrows one
+ * LLM call to a bounded sub-task whose expected output always fits in
+ * maxOutputTokens: `framing` produces the condensed market context and the
+ * full lot roster; `chunk` analyzes exactly the lots of one slice. A request
+ * without mission is the legacy single-call full-dossier analysis
+ * (standalone tenders, direct lots, small markets).
+ */
+export type AnalyzeCallMission =
+  | {
+      kind: "framing";
+      /** Lot numbers attested by the assembled documents (analysis_lot_number). */
+      expectedLotNumbers: string[];
+      /** Minimum roster size (max of DB lot children and document lot numbers). */
+      expectedLotCount: number;
+    }
+  | {
+      kind: "chunk";
+      /** 1-based slice index. */
+      index: number;
+      total: number;
+      lots: AnalyzeRosterLot[];
+      framing: { marketSummary: string; watchpoints: string[] };
+    };
+
 export interface AgentGenerationRequest {
   dossier: AnalyzeDossierInput;
   learning: AnalyzeLearningSnapshot;
   repair: boolean;
   maxSteps: number;
   maxOutputTokens: number;
+  /** Absent = legacy single-call full-dossier analysis. */
+  mission?: AnalyzeCallMission;
 }
 
 export interface AgentGenerationResult {

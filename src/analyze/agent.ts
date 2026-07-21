@@ -67,15 +67,15 @@ export class SdkAnalyzeStructuredOutputError extends Error {
   }
 }
 
-function roundedCost(value: number): number {
+export function roundedCost(value: number): number {
   return Math.round(value * 1_000_000_000_000) / 1_000_000_000_000;
 }
 
-function emptyUsage(): AnalyzeUsage {
+export function emptyUsage(): AnalyzeUsage {
   return { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
 }
 
-function addUsage(left: AnalyzeUsage, right: AnalyzeUsage): AnalyzeUsage {
+export function addUsage(left: AnalyzeUsage, right: AnalyzeUsage): AnalyzeUsage {
   return {
     inputTokens: left.inputTokens + right.inputTokens,
     outputTokens: left.outputTokens + right.outputTokens,
@@ -94,12 +94,14 @@ function assertConfig(config: { maxSteps: number; maxOutputTokens: number }): vo
   }
 }
 
-function assertDraftGrounded(
-  draft: DceAnalystResult["draft"],
-  dossier: AnalyzeDossierInput,
+/** Every cited/source document id must exist in the dossier (LOT H reuses
+ * this check per chunk so an ungrounded slice is retried alone). */
+export function assertUnitsCitationsGrounded(
+  units: DceAnalystResult["draft"]["units"],
+  documents: AnalyzeDossierInput["documents"],
 ): void {
-  const documentIds = new Set(dossier.documents.map((document) => document.id));
-  for (const unit of draft.units) {
+  const documentIds = new Set(documents.map((document) => document.id));
+  for (const unit of units) {
     const citedIds = [
       ...unit.citations.map((citation) => citation.documentId),
       ...unit.requiredQualifications.map((qualification) =>
@@ -113,6 +115,13 @@ function assertDraftGrounded(
       throw new AnalyzeDraftGroundingError();
     }
   }
+}
+
+export function assertDraftGrounded(
+  draft: DceAnalystResult["draft"],
+  dossier: AnalyzeDossierInput,
+): void {
+  assertUnitsCitationsGrounded(draft.units, dossier.documents);
 
   const explicitLotNumbers = new Set(dossier.documents.flatMap((document) =>
     document.lotNumber ? [document.lotNumber] : []

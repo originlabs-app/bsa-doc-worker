@@ -4,6 +4,10 @@ import {
   MAX_ANALYZE_OUTPUT_TOKENS,
   MAX_ANALYZE_STEPS,
 } from "./agent.js";
+import {
+  DEFAULT_ANALYZE_UNITS_PER_CALL,
+  MAX_ANALYZE_UNITS_PER_CALL,
+} from "./chunking.js";
 
 export const AnalyzeModeSchema = z.enum(["off", "shadow", "apply"]);
 export type AnalyzeMode = z.infer<typeof AnalyzeModeSchema>;
@@ -19,6 +23,8 @@ export interface AnalyzeConfig {
   model: string;
   maxSteps: number;
   maxOutputTokens: number;
+  /** LOT H — max lots analyzed per LLM call on large allotted markets. */
+  unitsPerCall: number;
   deadlineMinDays: number;
   recordTypes: AnalyzeRecordType[];
   openRouterApiKey: string | undefined;
@@ -93,6 +99,12 @@ export function loadAnalyzeConfig(
       rawValue: env.ANALYZE_MAX_OUTPUT_TOKENS,
       defaultValue: MAX_ANALYZE_OUTPUT_TOKENS,
       maximum: MAX_ANALYZE_OUTPUT_TOKENS,
+    }),
+    unitsPerCall: boundedInteger({
+      name: "ANALYZE_UNITS_PER_CALL",
+      rawValue: env.ANALYZE_UNITS_PER_CALL,
+      defaultValue: DEFAULT_ANALYZE_UNITS_PER_CALL,
+      maximum: MAX_ANALYZE_UNITS_PER_CALL,
     }),
     deadlineMinDays: boundedInteger({
       name: "DLRO_MIN_DAYS",
