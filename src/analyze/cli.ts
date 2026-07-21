@@ -179,6 +179,7 @@ export async function runAnalyzeCli(
       model: active.model,
       record_types: active.recordTypes,
       one_shot: true,
+      release: env.WORKER_RELEASE_SHA ?? "unknown",
     });
     const report = await (options.runner ?? runAnalyzeOneShot)(active, dependencies);
     logger.info("analyze_stopped", reportLogFields(report));

@@ -82,6 +82,29 @@ describe("runRecoveryCli", () => {
     expect(runner).toHaveBeenCalledOnce();
   });
 
+  it("logs the release sha provenance in recovery_started", async () => {
+    const output = logger();
+    const dependencies = {} as RecoverySweepDependencies;
+    const dependencyFactory = vi.fn(() => dependencies);
+    const runner = vi.fn(async () => report);
+
+    await expect(
+      runRecoveryCli(
+        {
+          RECOVERY_MODE: "dry_run",
+          WORKER_RELEASE_SHA: "abc1234",
+          SUPABASE_URL: "https://project.supabase.co",
+          SUPABASE_SERVICE_ROLE_KEY: "fixture-secret",
+        },
+        { logger: output.logger, dependencyFactory, runner },
+      ),
+    ).resolves.toBe(0);
+    expect(output.info).toHaveBeenCalledWith(
+      "recovery_started",
+      expect.objectContaining({ release: "abc1234" }),
+    );
+  });
+
   it("fails apply before clients when required portal secrets are absent", async () => {
     const output = logger();
     const dependencyFactory = vi.fn<RecoveryDependencyFactory>();

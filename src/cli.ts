@@ -209,7 +209,9 @@ export async function runCli(
         ? {}
         : { RECOVERY_PROVIDER: args.provider }),
     });
-    const logger = new JsonLineLogger(io.stderr);
+    // Batch CLI: stdout carries the NDJSON reports, so ALL log lines
+    // (info included) stay on stderr to keep the report stream parseable.
+    const logger = new JsonLineLogger(io.stderr, io.stderr);
     const input = await io.readInput(args.input);
     const lines = input.split(/\r?\n/).filter((line) => line.trim());
     if (lines.length === 0) throw new Error("empty input");

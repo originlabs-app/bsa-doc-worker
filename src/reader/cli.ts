@@ -130,6 +130,7 @@ export async function runReaderCli(
       worker_id: dependencies.workerId,
       batch: config.batch,
       model: config.model,
+      release: env.WORKER_RELEASE_SHA ?? "unknown",
     });
     const report: ReaderServiceReport = await (options.service ?? runReaderService)(
       config,

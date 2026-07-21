@@ -318,8 +318,17 @@ READER_POLL_MS="5000"
 
 The process rechecks `READER_MODE` between ticks and before apply-only writes;
 setting it to `off` and restarting/reloading the Railway service is the
-kill-switch. Logs are JSON lines and carry queue, tender, document, duration,
-cost, status and short issue fields; configured secrets and URLs are redacted.
+kill-switch. In `off` mode every CLI (READER, ANALYZE, RECOVERY) logs
+`*_stopped` and exits immediately: there is no in-process wait, so the restart
+interval while `off` is owned by the Railway start command (for example a
+`sleep` between one-shot runs) or the service cron, never by this code. Logs
+are JSON lines and carry queue, tender, document, duration, cost, status and
+short issue fields; configured secrets and URLs are redacted. Lifecycle events
+(`*_started`, `*_stopped` off/summary) are written to stdout at info level;
+real failures (`*_failed`, `*_terminal`, `analyze_error_detail`, `*_stopped`
+with an `issue`) go to stderr so Railway tags only them as errors. Each
+`*_started` event carries a `release` field sourced from `WORKER_RELEASE_SHA`
+(`unknown` when the variable is absent).
 
 All READER tests use mocks or generated local fixtures. No development or gate
 command requires or authorizes a production connection.
