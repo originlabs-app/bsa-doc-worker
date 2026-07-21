@@ -109,6 +109,7 @@ const tender = {
   estimated_value: "500000",
   procedure_type: "MAPA",
   deadline_date: "2026-09-30",
+  submission_date: null,
   relevance_score: "72",
   deleted_at: null,
   status: "opportunity",
@@ -538,6 +539,89 @@ describe("Supabase ANALYZE shadow integration", () => {
     expect(logger.info).toHaveBeenCalledWith(
       "analyze_shadow_comparison",
       expect.objectContaining({ delta: 28 }),
+    );
+  });
+
+  it("falls back on submission_date and applies the DLRO cap", async () => {
+    const fixture = fixtureClient({
+      tender: {
+        ...tender,
+        deadline_date: null,
+        submission_date: "2026-07-25",
+      },
+      company,
+      queue: [{ id: "queue-1", tender_id: "tender-1", attempts: 1 }],
+      documents: [document],
+    });
+    const store = createSupabaseAnalyzeStore(fixture.client);
+    const logger = { info: vi.fn() };
+
+    const assembled = await store.assembleCandidate(candidate);
+    expect(assembled).toMatchObject({
+      status: "ready",
+      assembly: { deadlineDate: "2026-07-25" },
+    });
+
+    const report = await runAnalyzeOneShot({
+      mode: "shadow",
+      model: "openai/gpt-5.6-terra",
+      maxSteps: 8,
+      maxOutputTokens: 8_192,
+      deadlineMinDays: 15,
+      openRouterApiKey: "test",
+    }, {
+      readStore: store,
+      applyStore: store,
+      client: {
+        generate: vi.fn().mockResolvedValue({
+          output: {
+            marketSummary: "Marché adapté.",
+            units: [{
+              unit: { kind: "lot", number: "1", title: "Rénovation" },
+              proposedVerdict: "favorable",
+              rationale: "Le besoin correspond au métier.",
+              criteria: {
+                metier: 30,
+                geo: 20,
+                montant: 20,
+                procedure: 15,
+                certifications: 0,
+              },
+              unknownCriteria: ["certifications"],
+              summary: {
+                scope: "Rénovation du bâtiment.",
+                services: ["Travaux"],
+                requirements: [],
+                qualifications: [],
+                amounts: ["500 000 euros"],
+                watchpoints: [],
+              },
+              requiredQualifications: [],
+              socialInsertion: null,
+              citations: [{ documentId: "doc-1", excerpt: "Texte extrait" }],
+            }],
+          },
+          stepsUsed: 2,
+          costUsd: 0.02,
+          usage: { inputTokens: 800, outputTokens: 300, totalTokens: 1_100 },
+        }),
+      },
+      recallLearning: vi.fn().mockResolvedValue({
+        lessons: [],
+        rules: [],
+        context: "",
+      }),
+      logger,
+    }, { now: () => new Date("2026-07-20T20:00:00.000Z") });
+
+    expect(report).toMatchObject({
+      mode: "shadow",
+      status: "analyzed",
+      analyzedScore: 40,
+    });
+    expect(logger.info).toHaveBeenCalledWith(
+      "analyze_shadow_comparison",
+      expect.objectContaining({ shadow_score: 40, deadline_gate: "applied" }),
     );
   });
 });
