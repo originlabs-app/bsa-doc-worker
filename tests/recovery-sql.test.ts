@@ -13,6 +13,7 @@ const WITH_DOC = "22222222-2222-4222-8222-222222222222";
 const RETRYING = "33333333-3333-4333-8333-333333333333";
 const SOFT_DELETED_DOC = "44444444-4444-4444-8444-444444444444";
 const COMPANY = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const SYSTEM_ACTOR = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 
 async function bootstrap(database: PGlite): Promise<void> {
   await database.exec(`
@@ -24,6 +25,10 @@ async function bootstrap(database: PGlite): Promise<void> {
     );
     CREATE TYPE public.nukema_queue_status AS ENUM (
       'pending', 'processing', 'done', 'failed'
+    );
+    CREATE TABLE public.profiles (
+      id uuid PRIMARY KEY,
+      name text NOT NULL
     );
     CREATE TABLE public.tender (
       id uuid PRIMARY KEY,
@@ -46,7 +51,7 @@ async function bootstrap(database: PGlite): Promise<void> {
     CREATE TABLE public.tender_document (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       tender_id uuid NOT NULL REFERENCES public.tender(id),
-      added_by uuid,
+      added_by uuid NOT NULL,
       document_type public.type_document NOT NULL,
       file_name text NOT NULL,
       url text NOT NULL,
@@ -85,6 +90,8 @@ async function bootstrap(database: PGlite): Promise<void> {
       );
     END;
     $$;
+    INSERT INTO public.profiles (id, name)
+    VALUES ('${SYSTEM_ACTOR}', 'Système Ingestion Nukema');
   `);
   const migration = await readFile(migrationUrl, "utf8");
   await database.exec(migration);
@@ -113,10 +120,10 @@ describe("tender DCE recovery SQL", () => {
         ('${RETRYING}', '${COMPANY}', 'Retry futur', 'Ville C', 'https://example.test/c', 'opportunity'),
         ('${SOFT_DELETED_DOC}', '${COMPANY}', 'Document supprimé', 'Ville D', 'https://example.test/d', 'opportunity');
       INSERT INTO public.tender_document (
-        tender_id, document_type, file_name, url, deleted_at
+        tender_id, added_by, document_type, file_name, url, deleted_at
       ) VALUES
-        ('${WITH_DOC}', 'other', 'active.pdf', '${COMPANY}/${WITH_DOC}/active.pdf', NULL),
-        ('${SOFT_DELETED_DOC}', 'other', 'deleted.pdf', '${COMPANY}/${SOFT_DELETED_DOC}/deleted.pdf', '2026-07-20T00:00:00Z');
+        ('${WITH_DOC}', '${SYSTEM_ACTOR}', 'other', 'active.pdf', '${COMPANY}/${WITH_DOC}/active.pdf', NULL),
+        ('${SOFT_DELETED_DOC}', '${SYSTEM_ACTOR}', 'other', 'deleted.pdf', '${COMPANY}/${SOFT_DELETED_DOC}/deleted.pdf', '2026-07-20T00:00:00Z');
       INSERT INTO public.tender_dce_recovery_attempt (
         tender_id, attempt_number, decision, status, evidence,
         attempt_at, attempt_day, next_retry_at, completed_at
@@ -184,6 +191,41 @@ describe("tender DCE recovery SQL", () => {
     expect(Number(retryTwo.rows[0]!.hours)).toBe(72);
   });
 
+  it("replays a crashed in-flight attempt only after its backoff", async () => {
+    await database.exec(`
+      INSERT INTO public.tender (
+        id, company_id, title, buyer_name, buyer_profile_link, status
+      ) VALUES (
+        '${NO_DOC}', '${COMPANY}', 'Crash replay', 'Ville A',
+        'https://example.test/a', 'opportunity'
+      );
+    `);
+    await database.query(`
+      SELECT * FROM public.reserve_tender_dce_recovery_attempt(
+        '${NO_DOC}', '2026-07-21T05:15:00Z'
+      )
+    `);
+
+    const tooEarly = await database.query(`
+      SELECT * FROM public.reserve_tender_dce_recovery_attempt(
+        '${NO_DOC}', '2026-07-22T05:14:59Z'
+      )
+    `);
+    expect(tooEarly.rows).toHaveLength(0);
+
+    const replay = await database.query<{ attempt_number: number }>(`
+      SELECT * FROM public.reserve_tender_dce_recovery_attempt(
+        '${NO_DOC}', '2026-07-22T05:15:01Z'
+      )
+    `);
+    expect(replay.rows[0]!.attempt_number).toBe(2);
+    const attempts = await database.query<{ status: string | null }>(`
+      SELECT status FROM public.tender_dce_recovery_attempt
+      WHERE tender_id = '${NO_DOC}' ORDER BY attempt_number
+    `);
+    expect(attempts.rows.map(({ status }) => status)).toEqual(["error", null]);
+  });
+
   it("persists the same manifest twice as one document and one queue row", async () => {
     await database.exec(`
       INSERT INTO public.tender (
@@ -204,7 +246,7 @@ describe("tender DCE recovery SQL", () => {
         file_name: "DCE.zip",
         object_path: `${COMPANY}/${NO_DOC}/DCE.zip`,
         source_url: "https://www.marches-publics.gouv.fr/consultation/42",
-        source_reference: "piece-42",
+        source_reference: "place:42:piece-42",
         bytes: 12,
         sha256: "a".repeat(64),
       },
@@ -223,12 +265,35 @@ describe("tender DCE recovery SQL", () => {
       documents: number;
       queues: number;
       found: number;
+      actors: number;
     }>(`
       SELECT
         (SELECT count(*)::int FROM public.tender_document WHERE tender_id = '${NO_DOC}') AS documents,
         (SELECT count(*)::int FROM public.dce_analysis_queue WHERE tender_id = '${NO_DOC}') AS queues,
-        (SELECT count(*)::int FROM public.tender_dce_recovery_attempt WHERE tender_id = '${NO_DOC}' AND status = 'found') AS found
+        (SELECT count(*)::int FROM public.tender_dce_recovery_attempt WHERE tender_id = '${NO_DOC}' AND status = 'found') AS found,
+        (SELECT count(*)::int FROM public.tender_document WHERE tender_id = '${NO_DOC}' AND added_by = '${SYSTEM_ACTOR}') AS actors
     `);
-    expect(counts.rows[0]).toEqual({ documents: 1, queues: 1, found: 1 });
+    expect(counts.rows[0]).toEqual({
+      documents: 1,
+      queues: 1,
+      found: 1,
+      actors: 1,
+    });
+  });
+
+  it("rejects apply readiness when the system profile is missing or duplicated", async () => {
+    await database.exec(`DELETE FROM public.profiles`);
+    await expect(
+      database.query(`SELECT public.assert_tender_dce_recovery_system_profile()`),
+    ).rejects.toThrow(/recovery_system_profile_not_unique/);
+
+    await database.exec(`
+      INSERT INTO public.profiles (id, name) VALUES
+        ('${SYSTEM_ACTOR}', 'Système Ingestion Nukema'),
+        ('cccccccc-cccc-4ccc-8ccc-cccccccccccc', 'Système Ingestion Nukema')
+    `);
+    await expect(
+      database.query(`SELECT public.assert_tender_dce_recovery_system_profile()`),
+    ).rejects.toThrow(/recovery_system_profile_not_unique/);
   });
 });

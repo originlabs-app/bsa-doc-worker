@@ -47,6 +47,7 @@ const discovery: AdapterDiscovery = {
 
 function dependencies(options: { candidates?: PortalCandidate[] } = {}) {
   const store: RecoveryAttemptStore = {
+    validateApplyReadiness: vi.fn(async () => undefined),
     listEligible: vi.fn(async () => [target]),
     reserve: vi.fn(async () => ({ attemptId: "attempt-1", attemptNumber: 1 })),
     finalize: vi.fn(async () => undefined),
@@ -58,7 +59,7 @@ function dependencies(options: { candidates?: PortalCandidate[] } = {}) {
         fileName: "DCE.zip",
         objectPath: `${target.companyId}/${target.tenderId}/DCE.zip`,
         sourceUrl: exactCandidate.consultationUrl,
-        sourceReference: "piece-1",
+        sourceReference: "place:42:piece-1",
         bytes: 10,
         sha256: "a".repeat(64),
       },
@@ -86,6 +87,19 @@ function dependencies(options: { candidates?: PortalCandidate[] } = {}) {
 }
 
 describe("runRecoverySweep", () => {
+  it("fails apply readiness before selection or portal traffic", async () => {
+    const fixture = dependencies();
+    vi.mocked(fixture.store.validateApplyReadiness).mockRejectedValueOnce(
+      new Error("RECOVERY_SYSTEM_PROFILE_INVALID"),
+    );
+
+    await expect(
+      runRecoverySweep({ mode: "apply", batchSize: 25 }, fixture.deps),
+    ).rejects.toThrow("RECOVERY_SYSTEM_PROFILE_INVALID");
+    expect(fixture.store.listEligible).not.toHaveBeenCalled();
+    expect(fixture.deps.searchPortal).not.toHaveBeenCalled();
+  });
+
   it("queries all three allowlisted portals in dry-run with zero writes or fetch", async () => {
     const fixture = dependencies();
 

@@ -152,6 +152,10 @@ export async function runRecoverySweep(
   const report = emptyReport(config.mode);
   if (config.mode === "off") return report;
 
+  if (config.mode === "apply") {
+    await dependencies.store.validateApplyReadiness();
+  }
+
   const targets = await dependencies.store.listEligible(config.batchSize);
   report.nEligible = targets.length;
 

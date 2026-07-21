@@ -65,6 +65,13 @@ export function createSupabaseRecoveryStore(
   client: RecoverySupabaseClient,
 ): RecoveryAttemptStore {
   return {
+    async validateApplyReadiness() {
+      checked(
+        await client.rpc("assert_tender_dce_recovery_system_profile", {}),
+        "RECOVERY_SYSTEM_PROFILE_INVALID",
+      );
+    },
+
     async listEligible(limit): Promise<RecoveryTarget[]> {
       const raw = checked(
         await client.rpc("list_tender_dce_recovery_candidates", {

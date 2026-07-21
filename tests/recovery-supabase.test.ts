@@ -35,6 +35,7 @@ describe("createSupabaseRecoveryStore", () => {
     const client: RecoverySupabaseClient = { rpc };
     const store = createSupabaseRecoveryStore(client);
 
+    await expect(store.validateApplyReadiness()).resolves.toBeUndefined();
     await expect(store.listEligible(25)).resolves.toEqual([
       {
         tenderId: "tender-1",
@@ -59,6 +60,7 @@ describe("createSupabaseRecoveryStore", () => {
     });
 
     expect(rpc.mock.calls.map(([name]) => name)).toEqual([
+      "assert_tender_dce_recovery_system_profile",
       "list_tender_dce_recovery_candidates",
       "reserve_tender_dce_recovery_attempt",
       "finalize_tender_dce_recovery_attempt",

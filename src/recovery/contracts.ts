@@ -79,6 +79,7 @@ export interface RecoveryDocumentPipeline {
 }
 
 export interface RecoveryAttemptStore {
+  validateApplyReadiness(): Promise<void>;
   listEligible(limit: number): Promise<RecoveryTarget[]>;
   reserve(tenderId: string): Promise<RecoveryReservation | null>;
   finalize(input: {

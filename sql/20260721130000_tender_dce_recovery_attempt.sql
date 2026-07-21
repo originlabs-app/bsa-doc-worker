@@ -2,7 +2,7 @@ BEGIN;
 
 CREATE TABLE IF NOT EXISTS public.tender_dce_recovery_attempt (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  tender_id uuid NOT NULL REFERENCES public.tender(id) ON DELETE RESTRICT,
+  tender_id uuid NOT NULL REFERENCES public.tender(id) ON DELETE CASCADE,
   attempt_number integer NOT NULL,
   portal text,
   decision text NOT NULL,
@@ -244,6 +244,28 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION public.assert_tender_dce_recovery_system_profile()
+RETURNS uuid
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+DECLARE
+  v_profile_ids uuid[];
+BEGIN
+  SELECT array_agg(profile.id ORDER BY profile.id)
+  INTO v_profile_ids
+  FROM public.profiles AS profile
+  WHERE profile.name = 'Système Ingestion Nukema';
+
+  IF coalesce(array_length(v_profile_ids, 1), 0) <> 1 THEN
+    RAISE EXCEPTION 'recovery_system_profile_not_unique';
+  END IF;
+  RETURN v_profile_ids[1];
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION public.persist_tender_dce_recovery_manifest(
   p_attempt_id uuid,
   p_tender_id uuid,
@@ -259,6 +281,8 @@ SET search_path TO ''
 AS $$
 DECLARE
   v_attempt public.tender_dce_recovery_attempt%ROWTYPE;
+  v_actor_id uuid;
+  v_company_id uuid;
   v_inserted integer := 0;
   v_queue jsonb := '{}'::jsonb;
 BEGIN
@@ -270,8 +294,12 @@ BEGIN
   END IF;
   IF jsonb_typeof(coalesce(p_documents, '[]'::jsonb)) <> 'array'
     OR jsonb_array_length(coalesce(p_documents, '[]'::jsonb)) = 0
+    OR jsonb_array_length(coalesce(p_documents, '[]'::jsonb)) > 100
   THEN
     RAISE EXCEPTION 'recovery_documents_required';
+  END IF;
+  IF jsonb_typeof(coalesce(p_evidence, '{}'::jsonb)) <> 'object' THEN
+    RAISE EXCEPTION 'recovery_evidence_must_be_object';
   END IF;
 
   PERFORM pg_advisory_xact_lock(hashtextextended(p_tender_id::text, 0));
@@ -292,13 +320,51 @@ BEGIN
   IF v_attempt.status IS NOT NULL THEN
     RAISE EXCEPTION 'recovery_attempt_already_finalized';
   END IF;
-  IF NOT EXISTS (
-    SELECT 1 FROM public.tender AS target
+  SELECT target.company_id
+  INTO v_company_id
+  FROM public.tender AS target
     WHERE target.id = p_tender_id
       AND target.deleted_at IS NULL
       AND target.status::text = 'opportunity'
-  ) THEN
+      AND coalesce(target.record_type, 'standalone') <> 'lot'
+  FOR UPDATE;
+  IF NOT FOUND THEN
     RAISE EXCEPTION 'recovery_tender_not_eligible';
+  END IF;
+  v_actor_id := public.assert_tender_dce_recovery_system_profile();
+
+  IF EXISTS (
+    SELECT 1
+    FROM jsonb_to_recordset(p_documents) AS document(
+      file_name text,
+      object_path text,
+      source_url text,
+      source_reference text,
+      bytes bigint,
+      sha256 text
+    )
+    WHERE nullif(btrim(document.file_name), '') IS NULL
+      OR char_length(document.file_name) > 255
+      OR document.file_name IN ('.', '..')
+      OR document.file_name ~ '[/\\]'
+      OR document.object_path IS DISTINCT FROM
+        v_company_id::text || '/' || p_tender_id::text || '/' || document.file_name
+      OR nullif(btrim(document.source_url), '') IS NULL
+      OR CASE p_portal
+        WHEN 'aw_solutions' THEN document.source_url !~
+          '^https://([a-z0-9-]+\.)*marches-publics\.info/'
+        WHEN 'place' THEN document.source_url !~
+          '^https://([a-z0-9-]+\.)*marches-publics\.gouv\.fr/'
+        WHEN 'maximilien' THEN document.source_url !~
+          '^https://([a-z0-9-]+\.)*marches\.maximilien\.fr/'
+        ELSE true
+      END
+      OR document.source_reference NOT LIKE p_portal || ':%:%'
+      OR document.bytes <= 0
+      OR document.bytes > 268435456
+      OR document.sha256 !~ '^[0-9a-f]{64}$'
+  ) THEN
+    RAISE EXCEPTION 'invalid_recovery_document_manifest';
   END IF;
 
   INSERT INTO public.tender_document (
@@ -313,7 +379,7 @@ BEGIN
   )
   SELECT
     p_tender_id,
-    NULL,
+    v_actor_id,
     'other'::public.type_document,
     document.file_name,
     document.object_path,
@@ -328,13 +394,7 @@ BEGIN
     bytes bigint,
     sha256 text
   )
-  WHERE nullif(btrim(document.file_name), '') IS NOT NULL
-    AND nullif(btrim(document.object_path), '') IS NOT NULL
-    AND nullif(btrim(document.source_url), '') IS NOT NULL
-    AND nullif(btrim(document.source_reference), '') IS NOT NULL
-    AND document.bytes > 0
-    AND document.sha256 ~ '^[0-9a-f]{64}$'
-    AND NOT EXISTS (
+  WHERE NOT EXISTS (
       SELECT 1
       FROM public.tender_document AS existing
       WHERE existing.tender_id = p_tender_id
@@ -378,6 +438,8 @@ REVOKE ALL ON FUNCTION public.reserve_tender_dce_recovery_attempt(uuid, timestam
   FROM public, anon, authenticated;
 REVOKE ALL ON FUNCTION public.finalize_tender_dce_recovery_attempt(uuid, text, text, text, jsonb)
   FROM public, anon, authenticated;
+REVOKE ALL ON FUNCTION public.assert_tender_dce_recovery_system_profile()
+  FROM public, anon, authenticated;
 REVOKE ALL ON FUNCTION public.persist_tender_dce_recovery_manifest(uuid, uuid, text, text, jsonb, jsonb)
   FROM public, anon, authenticated;
 
@@ -386,6 +448,8 @@ GRANT EXECUTE ON FUNCTION public.list_tender_dce_recovery_candidates(integer, ti
 GRANT EXECUTE ON FUNCTION public.reserve_tender_dce_recovery_attempt(uuid, timestamptz)
   TO service_role;
 GRANT EXECUTE ON FUNCTION public.finalize_tender_dce_recovery_attempt(uuid, text, text, text, jsonb)
+  TO service_role;
+GRANT EXECUTE ON FUNCTION public.assert_tender_dce_recovery_system_profile()
   TO service_role;
 GRANT EXECUTE ON FUNCTION public.persist_tender_dce_recovery_manifest(uuid, uuid, text, text, jsonb, jsonb)
   TO service_role;
