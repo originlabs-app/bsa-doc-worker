@@ -18,6 +18,7 @@ const assembly: AnalyzeDossierAssembly = {
   companyId: "company-1",
   recordType: "market",
   existingScore: 72,
+  deadlineDate: null,
   coverage: {
     complete: true,
     documentsCount: 1,
@@ -98,6 +99,7 @@ function config(mode: AnalyzeConfig["mode"]): AnalyzeConfig {
     model: "openai/gpt-5.6-terra",
     maxSteps: 8,
     maxOutputTokens: 8_192,
+    deadlineMinDays: 15,
     openRouterApiKey: mode === "off" ? undefined : "test",
   };
 }

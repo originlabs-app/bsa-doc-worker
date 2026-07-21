@@ -13,8 +13,12 @@ export interface AnalyzeConfig {
   model: string;
   maxSteps: number;
   maxOutputTokens: number;
+  deadlineMinDays: number;
   openRouterApiKey: string | undefined;
 }
+
+const MAX_DEADLINE_MIN_DAYS = 365;
+const DEFAULT_DEADLINE_MIN_DAYS = 15;
 
 const DEFAULT_ANALYZE_MODEL = "openai/gpt-5.6-terra";
 
@@ -62,6 +66,12 @@ export function loadAnalyzeConfig(
       rawValue: env.ANALYZE_MAX_OUTPUT_TOKENS,
       defaultValue: MAX_ANALYZE_OUTPUT_TOKENS,
       maximum: MAX_ANALYZE_OUTPUT_TOKENS,
+    }),
+    deadlineMinDays: boundedInteger({
+      name: "DLRO_MIN_DAYS",
+      rawValue: env.DLRO_MIN_DAYS,
+      defaultValue: DEFAULT_DEADLINE_MIN_DAYS,
+      maximum: MAX_DEADLINE_MIN_DAYS,
     }),
     openRouterApiKey,
   };

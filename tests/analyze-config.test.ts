@@ -9,8 +9,19 @@ describe("loadAnalyzeConfig", () => {
       model: "openai/gpt-5.6-terra",
       maxSteps: 8,
       maxOutputTokens: 8_192,
+      deadlineMinDays: 15,
       openRouterApiKey: undefined,
     });
+  });
+
+  it("bounds the DLRO minimum window like the other operator overrides", () => {
+    expect(loadAnalyzeConfig({ DLRO_MIN_DAYS: "10" }).deadlineMinDays).toBe(10);
+    expect(() => loadAnalyzeConfig({ DLRO_MIN_DAYS: "366" })).toThrow(
+      "DLRO_MIN_DAYS",
+    );
+    expect(() => loadAnalyzeConfig({ DLRO_MIN_DAYS: "abc" })).toThrow(
+      "DLRO_MIN_DAYS",
+    );
   });
 
   it("requires OpenRouter only when analysis is enabled", () => {
