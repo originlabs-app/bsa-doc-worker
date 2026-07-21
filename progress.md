@@ -497,3 +497,45 @@ Limites (à prouver au retour des crédits) : qualité réelle du cadrage (roste
 exhaustif sur vrais DCE), coût total multi-appels vs un appel, prompts de
 tranche non calibrés sur vrai LLM ; watchpoints globaux du cadrage servent de
 contexte aux tranches mais ne sont pas persistés en propre.
+
+## 2026-07-21 — LOT J : cascade modèle lecteur + audit 5% (feat/reader-model-cascade)
+
+Bénéfice : le lecteur tourne sur gemini-3.1-flash-lite (30x moins cher) sans
+perdre de pièces — si flash-lite viole 2x le schéma zod sur une pièce, UN
+SEUL appel gemini-3.5-flash tente de la sauver, sinon échec typé comme avant.
+Chaque pièce logge son modèle et son coût, et 5% des pièces réussies sont
+recontrôlées en continu contre le 3.5-flash.
+Architecture :
+1. src/reader/model-cascade.ts (nouveau) : readPdfWithModelCascade (2
+   tentatives titulaire, 1 seule tentative secours, erreurs provider
+   transitoires inchangées, coûts accumulés), generateAuditPayload (1 appel,
+   jamais bloquant), compareReaderPayloads (texte normalisé espaces +
+   pages_lues), isAuditSampled (SHA-256 de l'id % 100 < percent, aucun
+   Math.random).
+2. config.ts : OPENROUTER_MODEL_EXTRACT_FALLBACK (défaut google/gemini-3.5-
+   flash, chaîne vide = cascade off) + READER_AUDIT_SAMPLE_PERCENT (défaut 5,
+   0 = off, borné 0-100).
+3. readers.ts : chemins PDF (unitaire + chunks) passés sur la cascade ;
+   résultat porte fallbackUsed/zodAttempts/primaryCostUsd/fallbackCostUsd/
+   audit ; notes enrichies (fallbackUsed, zodAttempts, note audit_sample).
+   Audit par pièce : rejoue les mêmes appels (par chunk si chunké) sur le
+   secours, comparaison champ à champ sur l'agrégat.
+4. pipeline.ts : échantillonnage par document_id (zip : document_id +
+   entry_path), logs reader_piece_model {queue/document/tender id, model,
+   fallback_used, cost_usd, zod_attempts} et reader_audit_sample {agree,
+   fields_diff, status, cost_usd} ; ledger ai_spend éclaté par modèle réel
+   (ligne titulaire + ligne secours fallback_used:true + ligne audit
+   purpose:audit) ; complete() porte le modèle qui a réellement produit le
+   texte. Zip complete() garde config.model (détail par pièce dans notes).
+5. cli.ts : client secours instancié si configuré ; reader_started logge
+   model_fallback + audit_sample_percent.
+Ledger : le reader écrivait déjà ai_spend via store.recordSpend — le modèle
+par pièce y est maintenant exact ; pas de nouvelle table.
+Gates : typecheck OK, lint OK, test:ci 430/430 (411 au fork + 19 nouveaux
+cascade/audit/config), build OK. Rebase sur origin/main dd3c3f8 (LOT H
+disjoint), commit du lot [skip ci].
+Limites (à prouver au retour des crédits) : taux réel de sauvetage du
+3.5-flash sur pièces dégradées, taux d'accord lite vs 3.5 en vrai (le champ
+texte normalisé sera souvent en désaccord — c'est la donnée qu'on veut),
+coût observé de l'audit ; spends d'échec total restent attribués au modèle
+titulaire (coût combiné, métadonnées non éclatées sur ce chemin).

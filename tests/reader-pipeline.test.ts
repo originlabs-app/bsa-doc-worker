@@ -49,7 +49,9 @@ function config(mode: ReaderConfig["mode"], overrides: Partial<ReaderConfig> = {
   return {
     mode,
     batch: 2,
-    model: "google/gemini-3.5-flash",
+    model: "google/gemini-3.1-flash-lite",
+    modelFallback: "google/gemini-3.5-flash",
+    auditSamplePercent: 0,
     supabaseUrl: "https://example.supabase.co",
     supabaseServiceRoleKey: "service-role",
     openRouterApiKey: "openrouter",
@@ -184,7 +186,7 @@ describe("runReaderTick", () => {
     );
     expect(store.recordSpend).toHaveBeenCalledWith({
       tenderId: "tender-1",
-      model: "google/gemini-3.5-flash",
+      model: "google/gemini-3.1-flash-lite",
       costUsd: 0.02,
       metadata: {
         queue_id: "queue-1",
@@ -590,5 +592,209 @@ describe("runReaderTick", () => {
 
     expect(result.claimed).toBe(2);
     expect(store.claimNext).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("runReaderTick model cascade", () => {
+  function logger() {
+    return { info: vi.fn() };
+  }
+
+  function eventRecords(log: { info: ReturnType<typeof vi.fn> }, event: string) {
+    return log.info.mock.calls
+      .filter(([name]) => name === event)
+      .map(([, record]) => record as Record<string, unknown>);
+  }
+
+  it("rescues two zod failures with one fallback call, bills and logs both models", async () => {
+    const directory = await tempDirectory();
+    const path = join(directory, "RC.pdf");
+    await writeFile(path, await pdfBytes());
+    const store = fakeStore([claim()]);
+    const primary = invalidLlm();
+    const fallback = llm();
+    const log = logger();
+
+    const result = await runReaderTick(config("apply", { batch: 1 }), {
+      store,
+      source: source(path),
+      llmClient: primary,
+      fallbackLlmClient: fallback,
+      workerId: "reader:test",
+      logger: log,
+    });
+
+    expect(result).toMatchObject({ processed: 1, failed: 0 });
+    expect(primary.generate).toHaveBeenCalledTimes(2);
+    expect(fallback.generate).toHaveBeenCalledTimes(1);
+    expect(store.recordSpend).toHaveBeenCalledTimes(2);
+    expect(store.recordSpend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: "google/gemini-3.1-flash-lite",
+        costUsd: expect.closeTo(0.006, 9) as number,
+      }),
+    );
+    expect(store.recordSpend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: "google/gemini-3.5-flash",
+        costUsd: 0.02,
+        metadata: expect.objectContaining({ fallback_used: true }),
+      }),
+    );
+    expect(store.complete).toHaveBeenCalledWith(
+      expect.objectContaining({
+        extractionStatus: "extracted_ocr",
+        model: "google/gemini-3.5-flash",
+        costUsd: expect.closeTo(0.026, 9) as number,
+      }),
+    );
+    expect(eventRecords(log, "reader_piece_model")).toEqual([
+      expect.objectContaining({
+        queue_id: "queue-1",
+        document_id: "document-1",
+        model: "google/gemini-3.5-flash",
+        fallback_used: true,
+        zod_attempts: 2,
+        cost_usd: expect.closeTo(0.026, 9) as number,
+      }),
+    ]);
+    expect(eventRecords(log, "reader_audit_sample")).toEqual([]);
+  });
+
+  it("keeps today's failure path when the fallback model is disabled", async () => {
+    const directory = await tempDirectory();
+    const path = join(directory, "RC.pdf");
+    await writeFile(path, await pdfBytes());
+    const store = fakeStore([claim()]);
+    const fallback = llm();
+
+    const result = await runReaderTick(
+      config("apply", { batch: 1, modelFallback: null }),
+      {
+        store,
+        source: source(path),
+        llmClient: invalidLlm(),
+        fallbackLlmClient: fallback,
+        workerId: "reader:test",
+      },
+    );
+
+    expect(result.results[0]).toMatchObject({
+      status: "failed",
+      issue: "READER_LLM_INVALID_OUTPUT",
+      costUsd: 0.006,
+    });
+    expect(fallback.generate).not.toHaveBeenCalled();
+    expect(store.fail).toHaveBeenCalledTimes(1);
+  });
+
+  it("audits a sampled flash-lite success against the fallback and bills it separately", async () => {
+    const directory = await tempDirectory();
+    const path = join(directory, "RC.pdf");
+    await writeFile(path, await pdfBytes());
+    const store = fakeStore([claim()]);
+    const primary = llm();
+    const fallback: StructuredPdfClient = {
+      generate: vi.fn(async () => ({
+        object: { texte: "Règlement  lu", pages_lues: 1 },
+        costUsd: 0.01,
+      })),
+    };
+    const log = logger();
+
+    const result = await runReaderTick(
+      config("apply", { batch: 1, auditSamplePercent: 100 }),
+      {
+        store,
+        source: source(path),
+        llmClient: primary,
+        fallbackLlmClient: fallback,
+        workerId: "reader:test",
+        logger: log,
+      },
+    );
+
+    expect(result).toMatchObject({ processed: 1, failed: 0 });
+    expect(primary.generate).toHaveBeenCalledTimes(1);
+    expect(fallback.generate).toHaveBeenCalledTimes(1);
+    expect(eventRecords(log, "reader_audit_sample")).toEqual([
+      expect.objectContaining({
+        document_id: "document-1",
+        model: "google/gemini-3.5-flash",
+        status: "compared",
+        agree: true,
+        fields_diff: [],
+        cost_usd: 0.01,
+      }),
+    ]);
+    expect(store.recordSpend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: "google/gemini-3.5-flash",
+        costUsd: 0.01,
+        metadata: expect.objectContaining({ purpose: "audit" }),
+      }),
+    );
+    // Le coût de la pièce n'inclut pas l'audit.
+    expect(store.complete).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: "google/gemini-3.1-flash-lite",
+        costUsd: 0.02,
+      }),
+    );
+    expect(eventRecords(log, "reader_piece_model")).toEqual([
+      expect.objectContaining({ fallback_used: false, zod_attempts: 0 }),
+    ]);
+  });
+
+  it("reports a disagreeing audit with the differing fields", async () => {
+    const directory = await tempDirectory();
+    const path = join(directory, "RC.pdf");
+    await writeFile(path, await pdfBytes());
+    const store = fakeStore([claim()]);
+    const fallback: StructuredPdfClient = {
+      generate: vi.fn(async () => ({
+        object: { texte: "Autre lecture", pages_lues: 4 },
+        costUsd: 0.01,
+      })),
+    };
+    const log = logger();
+
+    await runReaderTick(config("apply", { batch: 1, auditSamplePercent: 100 }), {
+      store,
+      source: source(path),
+      llmClient: llm(),
+      fallbackLlmClient: fallback,
+      workerId: "reader:test",
+      logger: log,
+    });
+
+    expect(eventRecords(log, "reader_audit_sample")).toEqual([
+      expect.objectContaining({
+        agree: false,
+        fields_diff: ["texte", "pages_lues"],
+      }),
+    ]);
+  });
+
+  it("never audits when the sample percent is 0", async () => {
+    const directory = await tempDirectory();
+    const path = join(directory, "RC.pdf");
+    await writeFile(path, await pdfBytes());
+    const store = fakeStore([claim()]);
+    const fallback = llm();
+    const log = logger();
+
+    await runReaderTick(config("apply", { batch: 1, auditSamplePercent: 0 }), {
+      store,
+      source: source(path),
+      llmClient: llm(),
+      fallbackLlmClient: fallback,
+      workerId: "reader:test",
+      logger: log,
+    });
+
+    expect(fallback.generate).not.toHaveBeenCalled();
+    expect(eventRecords(log, "reader_audit_sample")).toEqual([]);
+    expect(store.recordSpend).toHaveBeenCalledTimes(1);
   });
 });

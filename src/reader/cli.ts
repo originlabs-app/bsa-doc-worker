@@ -66,6 +66,14 @@ function createDependencies(
       apiKey: config.openRouterApiKey,
       model: config.model,
     }),
+    ...(config.modelFallback
+      ? {
+          fallbackLlmClient: createOpenRouterPdfClient({
+            apiKey: config.openRouterApiKey,
+            model: config.modelFallback,
+          }),
+        }
+      : {}),
     workerId: `railway:${hostname()}:${process.pid}:${randomUUID()}`,
     logger,
     modeSource,
@@ -130,6 +138,8 @@ export async function runReaderCli(
       worker_id: dependencies.workerId,
       batch: config.batch,
       model: config.model,
+      model_fallback: config.modelFallback,
+      audit_sample_percent: config.auditSamplePercent,
       release: env.WORKER_RELEASE_SHA ?? "unknown",
     });
     const report: ReaderServiceReport = await (options.service ?? runReaderService)(

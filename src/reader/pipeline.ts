@@ -20,7 +20,12 @@ import {
   NukemaSourceExpiredError,
   NukemaSourceUnavailableError,
 } from "./nukema.js";
-import { detectDocumentKind, readLocalDocument } from "./readers.js";
+import { isAuditSampled } from "./model-cascade.js";
+import {
+  detectDocumentKind,
+  readLocalDocument,
+  type LocalDocumentReadResult,
+} from "./readers.js";
 import { buildDceTextPath } from "./storage.js";
 import {
   ReaderClaimLostError,
@@ -53,6 +58,8 @@ export interface ReaderPipelineDependencies {
   store: ReaderStore;
   source: ReaderDocumentSource;
   llmClient: StructuredPdfClient;
+  /** Modèle de secours de la cascade lecteur ; absent = cascade désactivée. */
+  fallbackLlmClient?: StructuredPdfClient;
   workerId: string;
   logger?: WorkerLogger;
   modeSource?: () => ReaderMode;
@@ -253,10 +260,12 @@ function spendDraft(input: {
   fileName: string;
   role: AnalysisRole | "inconnu";
   entryPath?: string;
+  model?: string;
+  metadataExtra?: Record<string, unknown>;
 }): AiSpendDraft {
   return {
     tenderId: input.claim.tender_id,
-    model: input.config.model,
+    model: input.model ?? input.config.model,
     costUsd: input.costUsd,
     metadata: {
       queue_id: input.claim.queue_id,
@@ -264,6 +273,7 @@ function spendDraft(input: {
       file_name: input.fileName,
       role: input.role,
       ...(input.entryPath ? { entry_path: input.entryPath } : {}),
+      ...(input.metadataExtra ?? {}),
     },
   };
 }
@@ -278,6 +288,106 @@ async function recordSpend(
   await dependencies.store.recordSpend(draft);
 }
 
+function cascadeEnabled(
+  config: ReaderConfig,
+  dependencies: ReaderPipelineDependencies,
+): boolean {
+  return Boolean(config.modelFallback && dependencies.fallbackLlmClient);
+}
+
+function pieceModel(config: ReaderConfig, fallbackUsed: boolean): string {
+  return fallbackUsed && config.modelFallback
+    ? config.modelFallback
+    : config.model;
+}
+
+/** Enregistre au ledger les coûts d'une pièce lue : titulaire, secours, audit. */
+async function recordReadSpends(input: {
+  claim: ClaimedDocument;
+  config: ReaderConfig;
+  dependencies: ReaderPipelineDependencies;
+  result: LocalDocumentReadResult;
+  fileName: string;
+  role: AnalysisRole | "inconnu";
+  entryPath?: string;
+}): Promise<void> {
+  const { claim, config, dependencies, result } = input;
+  const shared = {
+    claim,
+    config,
+    fileName: input.fileName,
+    role: input.role,
+    ...(input.entryPath ? { entryPath: input.entryPath } : {}),
+  };
+  const primaryCost = result.primaryCostUsd ?? result.modelCostUsd;
+  await recordSpend(
+    spendDraft({ ...shared, costUsd: primaryCost }),
+    config,
+    dependencies,
+  );
+  const fallbackCost = result.fallbackCostUsd ?? 0;
+  if (fallbackCost > 0 && config.modelFallback) {
+    await recordSpend(
+      spendDraft({
+        ...shared,
+        costUsd: fallbackCost,
+        model: config.modelFallback,
+        metadataExtra: { fallback_used: true },
+      }),
+      config,
+      dependencies,
+    );
+  }
+  if (result.audit && result.audit.costUsd > 0 && config.modelFallback) {
+    await recordSpend(
+      spendDraft({
+        ...shared,
+        costUsd: result.audit.costUsd,
+        model: config.modelFallback,
+        metadataExtra: { purpose: "audit" },
+      }),
+      config,
+      dependencies,
+    );
+  }
+}
+
+function logPieceTelemetry(input: {
+  claim: ClaimedDocument;
+  config: ReaderConfig;
+  dependencies: ReaderPipelineDependencies;
+  result: LocalDocumentReadResult;
+  fileName: string;
+  entryPath?: string;
+}): void {
+  const { claim, config, dependencies, result } = input;
+  if (result.zodAttempts === undefined) return;
+  const context = {
+    queue_id: claim.queue_id,
+    tender_id: claim.tender_id,
+    document_id: claim.document_id,
+    file_name: input.fileName,
+    ...(input.entryPath ? { entry_path: input.entryPath } : {}),
+  };
+  dependencies.logger?.info("reader_piece_model", {
+    ...context,
+    model: pieceModel(config, result.fallbackUsed ?? false),
+    fallback_used: result.fallbackUsed ?? false,
+    cost_usd: result.modelCostUsd,
+    zod_attempts: result.zodAttempts,
+  });
+  if (result.audit) {
+    dependencies.logger?.info("reader_audit_sample", {
+      ...context,
+      model: config.modelFallback,
+      status: result.audit.status,
+      agree: result.audit.agree,
+      fields_diff: result.audit.fieldsDiff,
+      cost_usd: result.audit.costUsd,
+    });
+  }
+}
+
 async function processRegularDocument(
   claim: ClaimedDocument,
   downloaded: DownloadedReaderDocument,
@@ -285,27 +395,36 @@ async function processRegularDocument(
   dependencies: ReaderPipelineDependencies,
   mode: "dry_run" | "apply",
 ) {
+  const cascade = cascadeEnabled(config, dependencies);
   const result = await readLocalDocument(
     { path: downloaded.path, fileName: claim.file_name },
     {
       llmClient: dependencies.llmClient,
+      fallbackLlmClient: cascade ? (dependencies.fallbackLlmClient ?? null) : null,
+      auditSampled:
+        cascade &&
+        isAuditSampled(claim.document_id, config.auditSamplePercent),
       knownRole: claim.analysis_role,
       maxModelBytes: config.maxModelBytes,
     },
   );
   const role = claim.analysis_role ?? classifyAnalysisRole(claim.file_name) ?? "inconnu";
+  logPieceTelemetry({
+    claim,
+    config,
+    dependencies,
+    result,
+    fileName: claim.file_name,
+  });
   if (mode === "apply") {
-    await recordSpend(
-      spendDraft({
-        claim,
-        config,
-        costUsd: result.modelCostUsd,
-        fileName: claim.file_name,
-        role,
-      }),
+    await recordReadSpends({
+      claim,
       config,
       dependencies,
-    );
+      result,
+      fileName: claim.file_name,
+      role,
+    });
     let textStoragePath: string | null = null;
     if (result.text) {
       textStoragePath = buildDceTextPath({
@@ -324,7 +443,10 @@ async function processRegularDocument(
       workerId: dependencies.workerId,
       extractionStatus: result.status,
       textStoragePath,
-      model: result.modelCostUsd > 0 ? config.model : null,
+      model:
+        result.modelCostUsd > 0
+          ? pieceModel(config, result.fallbackUsed ?? false)
+          : null,
       costUsd: result.modelCostUsd,
       notes: result.notes,
     });
@@ -352,6 +474,7 @@ async function processZipDocument(
   let failedLeaves = 0;
   let firstLeafError: unknown;
 
+  const cascade = cascadeEnabled(config, dependencies);
   for (const leaf of archive.leaves) {
     const fileName = names.get(leaf.entryPath) ?? sanitizeFileName(leaf.fileName);
     const fileRole = classifyAnalysisRole(leaf.entryPath);
@@ -361,6 +484,13 @@ async function processZipDocument(
         { path: leaf.path, fileName: leaf.fileName },
         {
           llmClient: dependencies.llmClient,
+          fallbackLlmClient: cascade ? (dependencies.fallbackLlmClient ?? null) : null,
+          auditSampled:
+            cascade &&
+            isAuditSampled(
+              `${claim.document_id}:${leaf.entryPath}`,
+              config.auditSamplePercent,
+            ),
           knownRole: fileRole,
           maxModelBytes: config.maxModelBytes,
         },
@@ -410,6 +540,14 @@ async function processZipDocument(
       })),
     );
     hasReadableChild ||= readable(result.status) && Boolean(result.text);
+    logPieceTelemetry({
+      claim,
+      config,
+      dependencies,
+      result,
+      fileName: leaf.fileName,
+      entryPath: leaf.entryPath,
+    });
 
     let role = fileRole;
     let roleSource: "filename" | "content" | null = role ? "filename" : null;
@@ -419,18 +557,15 @@ async function processZipDocument(
     }
 
     if (mode !== "apply") continue;
-    await recordSpend(
-      spendDraft({
-        claim,
-        config,
-        costUsd: result.modelCostUsd,
-        fileName: leaf.fileName,
-        role: role ?? "inconnu",
-        entryPath: leaf.entryPath,
-      }),
+    await recordReadSpends({
+      claim,
       config,
       dependencies,
-    );
+      result,
+      fileName: leaf.fileName,
+      role: role ?? "inconnu",
+      entryPath: leaf.entryPath,
+    });
     assertMode(config, dependencies, "apply");
     const child = await dependencies.store.upsertZipChild({
       queueId: claim.queue_id,

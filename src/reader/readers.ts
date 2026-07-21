@@ -7,12 +7,17 @@ import * as XLSX from "xlsx";
 import {
   ReaderLlmInvalidOutputError,
   ReaderLlmProviderError,
-  readPdfWithLlm,
   roundedCost,
   type StructuredPdfClient,
 } from "../llm/document-reader.js";
 import type { DocumentReaderRole } from "../llm/document-schemas.js";
 import { classifyAnalysisRole } from "./classification.js";
+import {
+  compareReaderPayloads,
+  generateAuditPayload,
+  readPdfWithModelCascade,
+  type CascadePdfInput,
+} from "./model-cascade.js";
 import {
   copyPdfHeadTailPages,
   splitPdfIntoPageChunks,
@@ -23,6 +28,7 @@ import type {
   DocumentKind,
   ExtractionNote,
   ExtractionStatus,
+  ReaderAuditOutcome,
 } from "./types.js";
 
 const PDF_SUBSET = { firstPages: 30, tailPages: 10 };
@@ -39,14 +45,25 @@ export interface LocalDocumentReadResult {
   kind: Exclude<DocumentKind, "zip">;
   status: ExtractionStatus;
   text: string;
+  /** Coût de la lecture (titulaire + secours), hors audit. */
   modelCostUsd: number;
   pagesRead?: number;
   modelAttempts?: number;
+  /** Présents uniquement quand la pièce est passée par le lecteur LLM. */
+  fallbackUsed?: boolean;
+  zodAttempts?: number;
+  primaryCostUsd?: number;
+  fallbackCostUsd?: number;
+  audit?: ReaderAuditOutcome;
   notes: ExtractionNote[];
 }
 
 export interface LocalDocumentReaderOptions {
   llmClient: StructuredPdfClient;
+  /** Modèle de secours de la cascade ; absent = cascade désactivée. */
+  fallbackLlmClient?: StructuredPdfClient | null;
+  /** Pièce tirée au sort pour l'audit lite vs secours (décidé par l'appelant). */
+  auditSampled?: boolean;
   knownRole: AnalysisRole | null;
   maxModelBytes: number;
   legacyDocExtractor?: (bytes: Uint8Array, fileName: string) => Promise<string>;
@@ -284,6 +301,71 @@ function readSpreadsheet(
   };
 }
 
+async function auditPiece(
+  calls: CascadePdfInput[],
+  expected: { text: string; pagesRead: number },
+  client: StructuredPdfClient,
+): Promise<ReaderAuditOutcome> {
+  let costUsd = 0;
+  const parts: string[] = [];
+  let pagesRead = 0;
+  for (const call of calls) {
+    const generated = await generateAuditPayload(call, client);
+    costUsd = roundedCost(costUsd + generated.costUsd);
+    if (!generated.payload) {
+      return { status: "audit_failed", agree: false, fieldsDiff: [], costUsd };
+    }
+    const text = generated.payload.texte.trim();
+    if (text) parts.push(text);
+    pagesRead += generated.payload.pages_lues;
+  }
+  const fieldsDiff = compareReaderPayloads(
+    { texte: expected.text, pages_lues: expected.pagesRead },
+    { texte: parts.join("\n\n").trim(), pages_lues: pagesRead },
+  );
+  return {
+    status: "compared",
+    agree: fieldsDiff.length === 0,
+    fieldsDiff,
+    costUsd,
+  };
+}
+
+function auditNote(fileName: string, audit: ReaderAuditOutcome): ExtractionNote {
+  return {
+    entry: fileName,
+    kind: "pdf",
+    status: "audit_sample",
+    reason:
+      audit.status === "audit_failed"
+        ? "audit_failed"
+        : audit.agree
+          ? "agree"
+          : `disagree:${audit.fieldsDiff.join(",")}`,
+    costUsd: audit.costUsd,
+  };
+}
+
+async function maybeAuditPiece(
+  calls: CascadePdfInput[],
+  read: { text: string; pagesRead: number; fallbackUsed: boolean },
+  options: LocalDocumentReaderOptions,
+): Promise<ReaderAuditOutcome | undefined> {
+  if (
+    !options.auditSampled ||
+    !options.fallbackLlmClient ||
+    read.fallbackUsed ||
+    !read.text
+  ) {
+    return undefined;
+  }
+  return auditPiece(
+    calls,
+    { text: read.text, pagesRead: read.pagesRead },
+    options.fallbackLlmClient,
+  );
+}
+
 async function readPdfInChunks(input: {
   document: LocalDocument;
   sourceBytes: Uint8Array;
@@ -296,20 +378,27 @@ async function readPdfInChunks(input: {
 }): Promise<LocalDocumentReadResult> {
   const parts: string[] = [];
   const chunkNotes: ExtractionNote[] = [];
+  const calls: CascadePdfInput[] = [];
   let totalCost = 0;
+  let primaryCost = 0;
+  let fallbackCost = 0;
   let pagesRead = 0;
   let attempts = 1;
+  let zodAttempts = 0;
+  let fallbackUsed = false;
   for (const chunk of input.chunks) {
+    const call: CascadePdfInput = {
+      bytes: chunk.bytes,
+      fileName: input.document.fileName,
+      role: input.role,
+    };
+    calls.push(call);
     let slice;
     try {
-      slice = await readPdfWithLlm(
-        {
-          bytes: chunk.bytes,
-          fileName: input.document.fileName,
-          role: input.role,
-        },
-        input.options.llmClient,
-      );
+      slice = await readPdfWithModelCascade(call, {
+        primary: input.options.llmClient,
+        fallback: input.options.fallbackLlmClient ?? undefined,
+      });
     } catch (error) {
       if (error instanceof ReaderLlmInvalidOutputError) {
         throw new ReaderLlmInvalidOutputError(
@@ -326,8 +415,12 @@ async function readPdfInChunks(input: {
       throw error;
     }
     totalCost = roundedCost(totalCost + slice.costUsd);
+    primaryCost = roundedCost(primaryCost + slice.primaryCostUsd);
+    fallbackCost = roundedCost(fallbackCost + slice.fallbackCostUsd);
     pagesRead += slice.pagesRead;
     attempts = Math.max(attempts, slice.attempts);
+    zodAttempts += slice.zodAttempts;
+    fallbackUsed ||= slice.fallbackUsed;
     if (slice.text) parts.push(slice.text);
     chunkNotes.push({
       entry: input.document.fileName,
@@ -337,9 +430,16 @@ async function readPdfInChunks(input: {
       pageCount: chunk.pageCount,
       costUsd: slice.costUsd,
       attempts: slice.attempts,
+      fallbackUsed: slice.fallbackUsed,
+      zodAttempts: slice.zodAttempts,
     });
   }
   const text = parts.join("\n\n").trim();
+  const audit = await maybeAuditPiece(
+    calls,
+    { text, pagesRead, fallbackUsed },
+    input.options,
+  );
   return {
     kind: "pdf",
     status: text ? "extracted_ocr" : "empty_text",
@@ -347,6 +447,11 @@ async function readPdfInChunks(input: {
     modelCostUsd: totalCost,
     pagesRead,
     modelAttempts: attempts,
+    fallbackUsed,
+    zodAttempts,
+    primaryCostUsd: primaryCost,
+    fallbackCostUsd: fallbackCost,
+    ...(audit ? { audit } : {}),
     notes: [
       {
         entry: input.document.fileName,
@@ -357,8 +462,11 @@ async function readPdfInChunks(input: {
         sentBytes: input.sentBytes.byteLength,
         ...(input.pageCount === undefined ? {} : { pageCount: input.pageCount }),
         ...(input.pages === undefined ? {} : { pages: input.pages }),
+        fallbackUsed,
+        zodAttempts,
       },
       ...chunkNotes,
+      ...(audit ? [auditNote(input.document.fileName, audit)] : []),
     ],
   };
 }
@@ -437,9 +545,23 @@ async function readPdf(
       ...(pages === undefined ? {} : { pages }),
     });
   }
-  const result = await readPdfWithLlm(
-    { bytes: sentBytes, fileName: document.fileName, role },
-    options.llmClient,
+  const call: CascadePdfInput = {
+    bytes: sentBytes,
+    fileName: document.fileName,
+    role,
+  };
+  const result = await readPdfWithModelCascade(call, {
+    primary: options.llmClient,
+    fallback: options.fallbackLlmClient ?? undefined,
+  });
+  const audit = await maybeAuditPiece(
+    [call],
+    {
+      text: result.text,
+      pagesRead: result.pagesRead,
+      fallbackUsed: result.fallbackUsed,
+    },
+    options,
   );
   return {
     kind: "pdf",
@@ -448,6 +570,11 @@ async function readPdf(
     modelCostUsd: result.costUsd,
     pagesRead: result.pagesRead,
     modelAttempts: result.attempts,
+    fallbackUsed: result.fallbackUsed,
+    zodAttempts: result.zodAttempts,
+    primaryCostUsd: result.primaryCostUsd,
+    fallbackCostUsd: result.fallbackCostUsd,
+    ...(audit ? { audit } : {}),
     notes: [
       {
         entry: document.fileName,
@@ -458,7 +585,10 @@ async function readPdf(
         sentBytes: sentBytes.byteLength,
         ...(pageCount === undefined ? {} : { pageCount }),
         ...(pages === undefined ? {} : { pages }),
+        fallbackUsed: result.fallbackUsed,
+        zodAttempts: result.zodAttempts,
       },
+      ...(audit ? [auditNote(document.fileName, audit)] : []),
     ],
   };
 }
