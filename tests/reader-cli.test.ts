@@ -20,6 +20,69 @@ describe("runReaderCli", () => {
     });
   });
 
+  it("logs the release sha provenance in reader_started", async () => {
+    const logger = { info: vi.fn() } satisfies WorkerLogger;
+    const dependencies = {
+      workerId: "reader:test",
+    } as ReaderPipelineDependencies;
+    const dependencyFactory = vi.fn(() => dependencies);
+    const service = vi.fn(async () => ({
+      mode: "dry_run" as const,
+      ticks: 1,
+      claimed: 0,
+    }));
+
+    await expect(
+      runReaderCli(
+        {
+          READER_MODE: "dry_run",
+          WORKER_RELEASE_SHA: "abc1234",
+          SUPABASE_URL: "https://example.supabase.co",
+          SUPABASE_SERVICE_ROLE_KEY: "service-role",
+          OPENROUTER_API_KEY: "openrouter",
+          NUKEMA_USERNAME: "reader",
+          NUKEMA_PASSWORD: "password",
+        },
+        { logger, dependencyFactory, service, installSignalHandlers: false },
+      ),
+    ).resolves.toBe(0);
+    expect(logger.info).toHaveBeenCalledWith(
+      "reader_started",
+      expect.objectContaining({ release: "abc1234" }),
+    );
+  });
+
+  it("logs release as unknown when WORKER_RELEASE_SHA is absent", async () => {
+    const logger = { info: vi.fn() } satisfies WorkerLogger;
+    const dependencies = {
+      workerId: "reader:test",
+    } as ReaderPipelineDependencies;
+    const dependencyFactory = vi.fn(() => dependencies);
+    const service = vi.fn(async () => ({
+      mode: "dry_run" as const,
+      ticks: 1,
+      claimed: 0,
+    }));
+
+    await expect(
+      runReaderCli(
+        {
+          READER_MODE: "dry_run",
+          SUPABASE_URL: "https://example.supabase.co",
+          SUPABASE_SERVICE_ROLE_KEY: "service-role",
+          OPENROUTER_API_KEY: "openrouter",
+          NUKEMA_USERNAME: "reader",
+          NUKEMA_PASSWORD: "password",
+        },
+        { logger, dependencyFactory, service, installSignalHandlers: false },
+      ),
+    ).resolves.toBe(0);
+    expect(logger.info).toHaveBeenCalledWith(
+      "reader_started",
+      expect.objectContaining({ release: "unknown" }),
+    );
+  });
+
   it("fails the live kill-switch closed when its value becomes invalid", async () => {
     const env: Record<string, string | undefined> = {
       READER_MODE: "dry_run",

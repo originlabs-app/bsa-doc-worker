@@ -225,6 +225,7 @@ export async function runRecoveryCli(
       mode: active.mode,
       one_shot: true,
       scheduled: options.scheduled ?? false,
+      release: env.WORKER_RELEASE_SHA ?? "unknown",
     });
     const report = await (options.runner ?? runRecoverySweep)(active, dependencies);
     logger.info("recovery_stopped", {

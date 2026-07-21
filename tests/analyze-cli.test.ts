@@ -52,6 +52,29 @@ describe("runAnalyzeCli", () => {
     );
   });
 
+  it("logs the release sha provenance in analyze_started", async () => {
+    const logger = { info: vi.fn() } satisfies WorkerLogger;
+    const dependencies = {} as AnalyzeOneShotDependencies;
+    const dependencyFactory = vi.fn(() => dependencies);
+    const runner = vi.fn().mockResolvedValue({
+      mode: "shadow",
+      status: "empty",
+    });
+
+    await expect(runAnalyzeCli({
+      ANALYZE_MODE: "shadow",
+      WORKER_RELEASE_SHA: "abc1234",
+      SUPABASE_URL: "https://example.supabase.co",
+      SUPABASE_SERVICE_ROLE_KEY: "service-role",
+      OPENROUTER_API_KEY: "openrouter",
+    }, { dependencyFactory, runner, logger })).resolves.toBe(0);
+
+    expect(logger.info).toHaveBeenCalledWith(
+      "analyze_started",
+      expect.objectContaining({ release: "abc1234" }),
+    );
+  });
+
   it("fails closed when active configuration is incomplete", async () => {
     const dependencyFactory = vi.fn();
 
