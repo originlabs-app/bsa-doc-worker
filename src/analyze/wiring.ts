@@ -24,6 +24,7 @@ export interface AnalyzeDossierAssembly {
   companyId: string;
   recordType: string | null;
   existingScore: number | null;
+  deadlineDate: string | null;
   dossier: AnalyzeDossierInput;
   coverage: {
     complete: boolean;
@@ -115,6 +116,7 @@ function logShadowResult(input: {
     delta,
     score_observed_at: input.observedAt,
     forced_zero: input.result.forcedZero,
+    deadline_gate: input.result.deadlineGate,
     recommended_lot: input.result.recommendedLot,
     model: input.result.model,
     cost_usd: input.result.costUsd,
@@ -217,6 +219,7 @@ export async function runAnalyzeOneShot(
       const serviceReport = await runAnalyzeService({
         config,
         dossier: assembly.dossier,
+        deadlineDate: assembly.deadlineDate,
         client: dependencies.client,
         recallLearning: () => dependencies.recallLearning(assembly),
         ...(sink ? { sink } : {}),

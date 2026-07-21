@@ -108,6 +108,7 @@ const tender = {
   department_code: "75",
   estimated_value: "500000",
   procedure_type: "MAPA",
+  deadline_date: "2026-09-30",
   relevance_score: "72",
   deleted_at: null,
   status: "opportunity",
@@ -178,6 +179,7 @@ describe("Supabase ANALYZE read adapter", () => {
       assembly: {
         companyId: "company-1",
         existingScore: 72,
+        deadlineDate: "2026-09-30",
         dossier: {
           tender: {
             id: "tender-1",
@@ -328,6 +330,7 @@ describe("Supabase ANALYZE apply contract", () => {
       companyId: "company-1",
       recordType: "market",
       existingScore: 72,
+      deadlineDate: null,
       dossier: {
         tender: {
           id: "tender-1",
@@ -398,6 +401,7 @@ describe("Supabase ANALYZE apply contract", () => {
       companyId: "company-1",
       recordType: "lot",
       existingScore: 72,
+      deadlineDate: null,
       dossier: {
         tender: {
           id: "tender-1",
@@ -473,6 +477,7 @@ describe("Supabase ANALYZE shadow integration", () => {
       model: "openai/gpt-5.6-terra",
       maxSteps: 8,
       maxOutputTokens: 8_192,
+      deadlineMinDays: 15,
       openRouterApiKey: "test",
     }, {
       readStore: store,

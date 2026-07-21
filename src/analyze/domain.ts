@@ -9,6 +9,57 @@ import type {
   MandatoryQualification,
 } from "./types.js";
 
+export type DeadlineGateStatus = "passed" | "applied" | "unknown";
+
+const DEADLINE_GATE_CAP = 40;
+
+function unique(values: string[]): string[] {
+  return [...new Set(values)];
+}
+
+// Port of the edge applyDeadlineGate (enrich-nukema-tender/scorer.ts): a
+// tender whose DLRO is closer than the minimum response window cannot keep a
+// GO-grade score, whatever the documentary analysis says.
+export function applyDeadlineGate(input: {
+  analysis: FinalizedAnalysis;
+  deadlineDate: string | null;
+  minimumDays: number;
+  now: Date;
+}): FinalizedAnalysis & { deadlineGate: DeadlineGateStatus } {
+  const deadlineText = input.deadlineDate?.trim() ? input.deadlineDate.trim() : null;
+  if (!deadlineText) return { ...input.analysis, deadlineGate: "unknown" };
+  const deadlineMs = Date.parse(deadlineText);
+  if (!Number.isFinite(deadlineMs)) {
+    return { ...input.analysis, deadlineGate: "unknown" };
+  }
+
+  const thresholdMs = input.now.getTime() +
+    input.minimumDays * 24 * 60 * 60 * 1000;
+  if (deadlineMs >= thresholdMs) {
+    return { ...input.analysis, deadlineGate: "passed" };
+  }
+
+  const normalizedDeadline = /^\d{4}-\d{2}-\d{2}/.test(deadlineText)
+    ? deadlineText.slice(0, 10)
+    : new Date(deadlineMs).toISOString().slice(0, 10);
+  const warning =
+    `Délai de réponse trop court (DLRO le ${normalizedDeadline}, fenêtre minimale ${input.minimumDays} j)`;
+  return {
+    ...input.analysis,
+    score: Math.min(input.analysis.score, DEADLINE_GATE_CAP),
+    watchpoints: unique([...input.analysis.watchpoints, warning]),
+    deadlineGate: "applied",
+    units: input.analysis.units.map((unit) => ({
+      ...unit,
+      score: Math.min(unit.score, DEADLINE_GATE_CAP),
+      summary: {
+        ...unit.summary,
+        watchpoints: unique([...unit.summary.watchpoints, warning]),
+      },
+    })),
+  };
+}
+
 function verdictFor(input: {
   blocked: boolean;
   recommended: boolean;

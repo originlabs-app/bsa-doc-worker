@@ -62,6 +62,7 @@ const TenderRowSchema = z.object({
   department_code: z.string().nullable(),
   estimated_value: z.union([z.string(), z.number()]).nullable(),
   procedure_type: z.string().nullable(),
+  deadline_date: z.string().nullable(),
   relevance_score: z.union([z.string(), z.number()]).nullable(),
   deleted_at: z.string().nullable(),
   status: z.string(),
@@ -195,7 +196,7 @@ async function assembleCandidate(
   const rawTender = await singleRow(
     client,
     "tender",
-    "id,company_id,title,buyer_name,summary_description,contract_subject,project_location,city,department_code,estimated_value,procedure_type,relevance_score,deleted_at,status,record_type,parent_tender_id",
+    "id,company_id,title,buyer_name,summary_description,contract_subject,project_location,city,department_code,estimated_value,procedure_type,deadline_date,relevance_score,deleted_at,status,record_type,parent_tender_id",
     candidate.tenderId,
   );
   if (!rawTender) return { status: "skipped", reason: "tender_missing" };
@@ -280,6 +281,7 @@ async function assembleCandidate(
       companyId: tender.company_id,
       recordType: tender.record_type,
       existingScore: finiteNumber(tender.relevance_score),
+      deadlineDate: nonBlank(tender.deadline_date),
       coverage: {
         complete: omittedDocuments === 0,
         documentsCount: assembledDocuments.length,

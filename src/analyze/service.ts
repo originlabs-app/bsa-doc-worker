@@ -7,7 +7,11 @@ import type {
   AnalyzeUsage,
 } from "./agent-types.js";
 import type { AnalyzeConfig, AnalyzeMode } from "./config.js";
-import { finalizeAnalysisDraft } from "./domain.js";
+import {
+  applyDeadlineGate,
+  finalizeAnalysisDraft,
+  type DeadlineGateStatus,
+} from "./domain.js";
 import type { FinalAnalysisUnit, FinalizedAnalysis } from "./types.js";
 
 export class AnalyzeApplySinkRequiredError extends Error {
@@ -47,6 +51,7 @@ export interface AnalysisResultSink {
 }
 
 export type AnalyzeResult = FinalizedAnalysis & {
+  deadlineGate: DeadlineGateStatus;
   analyzedAt: string;
   model: string;
   costUsd: number;
@@ -117,6 +122,7 @@ export function buildAnalysisWritePayload(input: {
         recommended_lot: input.result.recommendedLot,
         learning: input.result.learning,
         execution: input.result.execution,
+        deadline_gate: input.result.deadlineGate,
       },
       ai_analysis_cost_usd: input.result.costUsd,
       ai_analysis_model: input.result.model,
@@ -145,6 +151,7 @@ export function buildAnalysisWritePayload(input: {
 export async function runAnalyzeService(input: {
   config: AnalyzeConfig;
   dossier: AnalyzeDossierInput;
+  deadlineDate?: string | null;
   client: AgentGenerationClient;
   recallLearning: () => Promise<AnalyzeLearningSnapshot>;
   sink?: AnalysisResultSink;
@@ -167,14 +174,21 @@ export async function runAnalyzeService(input: {
       maxOutputTokens: input.config.maxOutputTokens,
     },
   });
+  const now = input.now ?? (() => new Date());
   const finalized = finalizeAnalysisDraft({
     draft: generated.draft,
     company: input.dossier.company,
     mandatoryQualifications: input.dossier.mandatoryQualifications,
   });
+  const gated = applyDeadlineGate({
+    analysis: finalized,
+    deadlineDate: input.deadlineDate ?? null,
+    minimumDays: input.config.deadlineMinDays,
+    now: now(),
+  });
   const result: AnalyzeResult = {
-    ...finalized,
-    analyzedAt: (input.now ?? (() => new Date()))().toISOString(),
+    ...gated,
+    analyzedAt: now().toISOString(),
     model: input.config.model,
     costUsd: generated.costUsd,
     usage: generated.usage,
@@ -196,6 +210,7 @@ export async function runAnalyzeService(input: {
       tender_id: input.dossier.tender.id,
       score: result.score,
       forced_zero: result.forcedZero,
+      deadline_gate: result.deadlineGate,
       recommended_lot: result.recommendedLot,
       lots_count: result.units.length,
       cost_usd: result.costUsd,

@@ -114,6 +114,7 @@ function config(mode: AnalyzeConfig["mode"]): AnalyzeConfig {
     model: "openai/gpt-5.6-terra",
     maxSteps: 8,
     maxOutputTokens: 8_192,
+    deadlineMinDays: 15,
     openRouterApiKey: mode === "off" ? undefined : "test",
   };
 }
@@ -238,6 +239,63 @@ describe("runAnalyzeService", () => {
       }),
     }));
     expect(recordLearningUsage).toHaveBeenCalledWith(["rule-1"]);
+  });
+
+  it("caps the applied analysis and records the deadline gate in the details", async () => {
+    const sink: AnalysisResultSink = { write: vi.fn().mockResolvedValue(undefined) };
+
+    const report = await runAnalyzeService({
+      config: config("apply"),
+      dossier,
+      deadlineDate: "2026-07-25",
+      client: client(),
+      recallLearning: vi.fn().mockResolvedValue(learning),
+      sink,
+      now: () => new Date("2026-07-20T20:00:00.000Z"),
+    });
+
+    expect(report.status).toBe("analyzed");
+    if (report.status !== "analyzed") throw new Error("Expected analysis");
+    expect(report.result.deadlineGate).toBe("applied");
+    const warning =
+      "Délai de réponse trop court (DLRO le 2026-07-25, fenêtre minimale 15 j)";
+    expect(sink.write).toHaveBeenCalledWith(expect.objectContaining({
+      tenderValues: expect.objectContaining({
+        relevance_score: 40,
+        watchpoints: expect.arrayContaining([warning]),
+        dce_analysis_details: expect.objectContaining({
+          deadline_gate: "applied",
+        }),
+      }),
+      lots: expect.arrayContaining([
+        expect.objectContaining({ number: "1", relevanceScore: 40 }),
+        expect.objectContaining({ number: "2", relevanceScore: 40 }),
+      ]),
+    }));
+  });
+
+  it("marks the gate unknown without touching scores when no deadline is known", async () => {
+    const sink: AnalysisResultSink = { write: vi.fn().mockResolvedValue(undefined) };
+
+    const report = await runAnalyzeService({
+      config: config("apply"),
+      dossier,
+      deadlineDate: null,
+      client: client(),
+      recallLearning: vi.fn().mockResolvedValue(learning),
+      sink,
+      now: () => new Date("2026-07-20T20:00:00.000Z"),
+    });
+
+    expect(report.status).toBe("analyzed");
+    expect(sink.write).toHaveBeenCalledWith(expect.objectContaining({
+      tenderValues: expect.objectContaining({
+        relevance_score: 100,
+        dce_analysis_details: expect.objectContaining({
+          deadline_gate: "unknown",
+        }),
+      }),
+    }));
   });
 
   it("fails closed before analysis when apply has no sink", async () => {
