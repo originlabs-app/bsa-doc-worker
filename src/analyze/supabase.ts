@@ -351,17 +351,26 @@ async function writeAnalysis(
       eq(column: string, value: string): {
         is(column: string, value: null): {
           not(column: string, operator: string, value: string): {
-            select(columns: string): {
-              maybeSingle(): Promise<SupabaseResult>;
+            filter(column: string, operator: string, value: string): {
+              select(columns: string): {
+                maybeSingle(): Promise<SupabaseResult>;
+              };
             };
           };
         };
       };
     };
-  }).update(payload.tenderValues)
+  }).update({
+    ...payload.tenderValues,
+    analysis_state: assembly.coverage.complete ? "completed" : "partial",
+  })
     .eq("id", payload.tenderId)
     .is("deleted_at", null)
     .not("status", "in", "(rejected,no_go)")
+    // isdistinct is NULL-safe: standalone tenders (NULL lot state) stay
+    // writable while human-validated lots remain untouchable. or= is not
+    // an option: PostgREST rejects it on UPDATE (42703).
+    .filter("lot_analysis_state", "isdistinct", "human_validated")
     .select("id")
     .maybeSingle();
   const updated = checked(guardedUpdate, "ANALYZE_TENDER_WRITE_FAILED");

@@ -27,6 +27,7 @@ function queryResult(
     eq: (...args: unknown[]) => chain("eq", args),
     is: (...args: unknown[]) => chain("is", args),
     not: (...args: unknown[]) => chain("not", args),
+    filter: (...args: unknown[]) => chain("filter", args),
     update: (...args: unknown[]) => chain("update", args),
     maybeSingle: vi.fn(async () => result),
     then: (
@@ -372,8 +373,20 @@ describe("Supabase ANALYZE apply contract", () => {
       p_metadata: { forced_zero: false },
     });
     expect(fixture.updates).toEqual(expect.arrayContaining([
-      { table: "tender", values: expect.objectContaining({ relevance_score: 100 }) },
+      {
+        table: "tender",
+        values: expect.objectContaining({
+          relevance_score: 100,
+          analysis_state: "completed",
+        }),
+      },
       { table: "dce_analysis_queue", values: expect.objectContaining({ status: "done" }) },
+    ]));
+    expect(fixture.operations.get("tender")).toEqual(expect.arrayContaining([
+      {
+        method: "filter",
+        args: ["lot_analysis_state", "isdistinct", "human_validated"],
+      },
     ]));
   });
 
