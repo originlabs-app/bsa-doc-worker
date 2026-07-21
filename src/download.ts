@@ -27,14 +27,14 @@ export interface StreamAttachmentOptions {
 export class DownloadError extends Error {
   readonly reasonCode = "DOWNLOAD_INCOMPLETE" as const;
 
-  constructor() {
+  constructor(readonly kind: "incomplete" | "too_large" = "incomplete") {
     super("DOWNLOAD_INCOMPLETE");
     this.name = "DownloadError";
   }
 }
 
-function failDownload(): never {
-  throw new DownloadError();
+function failDownload(kind: "incomplete" | "too_large" = "incomplete"): never {
+  throw new DownloadError(kind);
 }
 
 function isHostOrSubdomain(hostname: string, rootHost: string): boolean {
@@ -158,12 +158,20 @@ export async function streamAttachment(
 ): Promise<DownloadReceipt> {
   const fetcher = options.fetcher ?? fetch;
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
+  if (
+    attachment.expectedSize !== null &&
+    attachment.expectedSize > maxBytes
+  ) {
+    failDownload("too_large");
+  }
   const response = await fetchAllowlisted(attachment, fetcher);
   if (!response.ok || !response.body) failDownload();
   const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
   if (contentType.includes("text/html")) failDownload();
   const declaredSize = Number(response.headers.get("content-length"));
-  if (Number.isFinite(declaredSize) && declaredSize > maxBytes) failDownload();
+  if (Number.isFinite(declaredSize) && declaredSize > maxBytes) {
+    failDownload("too_large");
+  }
 
   const quarantine = await sink.open(attachment);
   const hash = createHash("sha256");
@@ -174,7 +182,7 @@ export async function streamAttachment(
       const buffer = Buffer.from(chunk);
       bytes += buffer.byteLength;
       if (bytes > maxBytes) {
-        callback(new DownloadError());
+        callback(new DownloadError("too_large"));
         return;
       }
       hash.update(buffer);
@@ -211,8 +219,9 @@ export async function streamAttachment(
     };
     await quarantine.commit(receipt);
     return receipt;
-  } catch {
+  } catch (error) {
     await quarantine.abort().catch(() => undefined);
+    if (error instanceof DownloadError) throw error;
     throw new DownloadError();
   }
 }

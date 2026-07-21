@@ -480,7 +480,10 @@ describe("PlaywrightAwBrowserSession.discover", () => {
     requestedLots: { kind: "all" },
   };
 
-  function sessionFor(flow: ReturnType<typeof fakeAwDiscoverFlow>) {
+  function sessionFor(
+    flow: ReturnType<typeof fakeAwDiscoverFlow>,
+    captchaBudget?: AwCaptchaSolveBudget,
+  ) {
     vi.mocked(chromium.connectOverCDP).mockResolvedValue(
       flow.browser as never,
     );
@@ -489,6 +492,7 @@ describe("PlaywrightAwBrowserSession.discover", () => {
       awPortalEmail: "operator@example.test",
       awPortalPassword: "fixture-password",
       timeoutMs: 1_000,
+      ...(captchaBudget ? { captchaBudget } : {}),
     });
   }
 
@@ -517,6 +521,19 @@ describe("PlaywrightAwBrowserSession.discover", () => {
     expect(flow.captchaSolveSurfaces).toEqual(["avertissement"]);
     expect(flow.isLotFormSubmitted()).toBe(true);
     expect(discovery.consultationId).toBe("1848459");
+  });
+
+  it("shares the ten-unit CAPTCHA budget across a whole recovery run", async () => {
+    const budget = new AwCaptchaSolveBudget();
+    const first = fakeAwDiscoverFlow("avertissement");
+    await sessionFor(first, budget).discover(request);
+
+    const second = fakeAwDiscoverFlow("avertissement");
+    await expect(sessionFor(second, budget).discover(request)).rejects.toMatchObject({
+      reasonCode: "CAPTCHA_UNSOLVED",
+    });
+    expect(budget.unitsCommitted).toBe(10);
+    expect(second.captchaSolveSurfaces).toEqual([]);
   });
 });
 

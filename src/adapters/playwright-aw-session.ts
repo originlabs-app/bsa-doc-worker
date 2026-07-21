@@ -55,6 +55,7 @@ export interface PlaywrightAwSessionOptions {
   awPortalEmail: string;
   awPortalPassword: string;
   timeoutMs?: number;
+  captchaBudget?: AwCaptchaSolveBudget;
 }
 
 function buildBrowserlessEndpoint(token: string): string {
@@ -292,7 +293,8 @@ export class PlaywrightAwBrowserSession implements AwBrowserSession {
 
   async discover(request: RecoveryRequest): Promise<AwBrowserDiscovery> {
     let browser: Browser | undefined;
-    const captchaBudget = new AwCaptchaSolveBudget();
+    const captchaBudget =
+      this.options.captchaBudget ?? new AwCaptchaSolveBudget();
     try {
       browser = await chromium.connectOverCDP(
         buildBrowserlessEndpoint(this.options.browserlessToken),

@@ -53,6 +53,35 @@ describe("classifyRecoveryCandidate", () => {
     ).toMatchObject({ level: "strong", buyerExact: true });
   });
 
+  it("requires two distinct lot confirmations for a title-only strong match", () => {
+    const titleOnlyTarget = {
+      ...target,
+      title: "Réhabilitation école isolation étanchéité chauffage",
+      lotTitles: ["Isolation thermique", "Étanchéité toiture"],
+    };
+    const confirmed = classifyRecoveryCandidate(
+      titleOnlyTarget,
+      candidate({
+        reference: "different",
+        buyerName: "Autre acheteur",
+        canonicalTitle:
+          "Réhabilitation école isolation étanchéité chauffage toiture",
+      }),
+    );
+    expect(confirmed).toMatchObject({ level: "strong", lotTitleMatches: 2 });
+
+    const unconfirmed = classifyRecoveryCandidate(
+      { ...titleOnlyTarget, lotTitles: ["Isolation thermique"] },
+      candidate({
+        reference: "different",
+        buyerName: "Autre acheteur",
+        canonicalTitle:
+          "Réhabilitation école isolation étanchéité chauffage toiture",
+      }),
+    );
+    expect(unconfirmed.level).toBe("medium");
+  });
+
   it("never promotes lot tokens alone to strong", () => {
     const result = classifyRecoveryCandidate(
       target,
@@ -63,7 +92,7 @@ describe("classifyRecoveryCandidate", () => {
       }),
     );
 
-    expect(result.lotTokenHits).toBeGreaterThanOrEqual(2);
+    expect(result.lotTitleMatches).toBe(2);
     expect(result.level).toBe("medium");
   });
 

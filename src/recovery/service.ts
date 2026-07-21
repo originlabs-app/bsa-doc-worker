@@ -87,6 +87,7 @@ function safeEvidence(
       buyer_exact: match.buyerExact,
       title_jaccard: Number(match.titleJaccard.toFixed(4)),
       lot_token_hits: match.lotTokenHits,
+      lot_title_matches: match.lotTitleMatches,
     })),
   };
 }

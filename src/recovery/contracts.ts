@@ -47,6 +47,7 @@ export interface MatchEvidence {
   buyerExact: boolean;
   titleJaccard: number;
   lotTokenHits: number;
+  lotTitleMatches: number;
   candidate: PortalCandidate;
 }
 

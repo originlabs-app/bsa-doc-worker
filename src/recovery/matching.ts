@@ -1,4 +1,3 @@
-import { classifySweepCandidate } from "../sweep.js";
 import type {
   MatchEvidence,
   PortalCandidate,
@@ -76,26 +75,19 @@ export function classifyRecoveryCandidate(
     normalize(target.buyerName) === normalize(candidate.buyerName);
   const lotTokens = distinctiveTokens(target.lotTitles.join(" "));
   const lotTokenHits = intersectionSize(lotTokens, candidateTitleTokens);
-  const strict = classifySweepCandidate(
-    {
-      protocol: "B",
-      title: target.title,
-      reference: target.reference,
-      buyerName: target.buyerName,
-    },
-    candidate,
-  );
+  const lotTitleMatches = target.lotTitles.filter((lotTitle) =>
+    intersectionSize(distinctiveTokens(lotTitle), candidateTitleTokens) > 0
+  ).length;
 
   let level: MatchEvidence["level"] = "low";
-  if (referenceExact || (strict.accepted && strict.matchedBy === "exact_reference")) {
+  if (referenceExact) {
     level = "exact";
   } else if (
-    strict.accepted ||
     (buyerExact && titleJaccard >= strongThreshold) ||
-    titleJaccard >= titleOnlyThreshold
+    (titleJaccard >= titleOnlyThreshold && lotTitleMatches >= 2)
   ) {
     level = "strong";
-  } else if (buyerExact || titleJaccard >= 0.2 || lotTokenHits >= 2) {
+  } else if (buyerExact || titleJaccard >= 0.25 || lotTitleMatches >= 1) {
     level = "medium";
   }
 
@@ -105,6 +97,7 @@ export function classifyRecoveryCandidate(
     buyerExact,
     titleJaccard,
     lotTokenHits,
+    lotTitleMatches,
     candidate,
   };
 }
