@@ -25,69 +25,96 @@ const target: RecoveryTarget = {
 };
 
 describe("buildRecoverySearchTerms", () => {
-  it("keeps identity and lot evidence bounded to nine unique public queries", () => {
+  it("prioritizes a distinctive title term and stays within four queries", () => {
     const terms = buildRecoverySearchTerms(target);
 
+    expect(terms[0]).toBe("Aussillon");
     expect(terms).toContain("26-71800");
     expect(terms).toContain("TRIFYL");
-    expect(terms).toContain("Aussillon");
     expect(terms).toContain("Démolition");
     expect(new Set(terms).size).toBe(terms.length);
-    expect(terms.length).toBeLessThanOrEqual(9);
+    expect(terms.length).toBeLessThanOrEqual(4);
   });
 });
 
 describe("public candidate parsers", () => {
-  it("extracts a safe AW identity without following an external link", () => {
+  it("extracts an AW identity while keeping an external DCE blocked", () => {
     const result = parseAwPublicCandidates(`
       <div class="container-fluid" id="entity">
+        <h2 class="h2-avis">Eurométropole de Strasbourg (67076)</h2>
         <div id="titre_box">
-          Réhabilitation de l'école Jean Jaurès
-          <span class="ref-acheteur">Référence acheteur : LYON-42</span>
-          <p class="acheteur">Acheteur : Ville de Lyon</p>
+          <span class="ref-acheteur">[réf. 26EMS0120]</span>
+          Travaux de rénovation patrimoniale du Bastion XV, Rue du Rempart à Strasbourg
+          <p>Date limite : 15/09/26 à 12h00</p>
         </div>
-        <a title="Dossier de Consultation"
-           href="/mpIAWS/index.cfm?fuseaction=dematEnt.login&amp;type=DCE&amp;IDM=42">DCE</a>
-        <a href="https://www.achatpublic.com/other">Déposer un pli</a>
+        <a href="/Annonces/MPI-pub-20262001118.htm">Avis complet</a>
+        <a title="Candidature et/ou Offre"
+           href="https://plateforme.alsacemarchespublics.eu">Déposer un pli</a>
       </div>
     `);
 
     expect(result.candidates).toEqual([
       {
-        canonicalTitle: "Réhabilitation de l'école Jean Jaurès",
-        reference: "LYON-42",
-        buyerName: "Ville de Lyon",
+        canonicalTitle:
+          "Travaux de rénovation patrimoniale du Bastion XV, Rue du Rempart à Strasbourg",
+        reference: "26EMS0120",
+        buyerName: "Eurométropole de Strasbourg",
         consultationUrl:
-          "https://www.marches-publics.info/mpIAWS/index.cfm?fuseaction=dematEnt.login&type=DCE&IDM=42",
+          "https://www.marches-publics.info/Annonces/MPI-pub-20262001118.htm",
+        deadlineAt: "2026-09-15T10:00:00.000Z",
+        lotTitles: [],
+        recoveryDisposition: "external_blocked",
+        blockedExternalHost: "plateforme.alsacemarchespublics.eu",
       },
     ]);
-    expect(result.blockedExternalHosts).toEqual(["www.achatpublic.com"]);
+    expect(result.blockedExternalHosts).toEqual([
+      "plateforme.alsacemarchespublics.eu",
+    ]);
   });
 
   it("extracts PLACE and Maximilien consultation identities from Atexo results", () => {
     const html = `
       <div class="item_consultation">
-        <div class="objet-line"><span title="Réfection étanchéité lycée Vinci">Objet</span></div>
-        <div class="reference">Référence : 2600683</div>
-        <div class="acheteur">Acheteur : Région Île-de-France</div>
-        <a href="/index.php?page=Entreprise.EntrepriseDetailsConsultation&amp;id=942952&amp;orgAcronyme=IDF">Accéder à la consultation</a>
+        <input type="hidden" name="refCons" value="942952">
+        <input type="hidden" name="orgCons" value="t5y">
+        <div class="objet-line">
+          <div class="m-b-1"><span class="small pull-left">2600683</span></div>
+          <div class="truncate"><span title="Travaux de réfection de l'étanchéité et de chauffage au lycée Léonard de Vinci à Saint Witz (95)">Objet</span></div>
+        </div>
+        <div id="ctl0_result_ctl1_panelBlocDenomination">
+          <div class="truncate-700" title="Conseil Régional d'Ile-de-France (93400 - Saint-Ouen-sur-Seine)">Acheteur</div>
+        </div>
+        <div class="cons_dateEnd">
+          <div class="day"><span>18</span></div>
+          <div class="month"><span>Sept.</span></div>
+          <div class="year"><span>2026</span></div>
+          <div class="time"><label>12:00</label></div>
+        </div>
+        <a href="https://marches.maximilien.fr/entreprise/consultation/942952?orgAcronyme=t5y">Accéder à la consultation</a>
+        <a href="javascript:popUpOpen('index.php?page=Entreprise.PopUpDetailLots&amp;orgAccronyme=t5y&amp;id=942952&amp;lang=', 700, 500)">Lots</a>
       </div>
     `;
 
     expect(
       parseAtexoPublicCandidates(html, "maximilien").candidates[0],
     ).toMatchObject({
-      canonicalTitle: "Réfection étanchéité lycée Vinci",
+      canonicalTitle:
+        "Travaux de réfection de l'étanchéité et de chauffage au lycée Léonard de Vinci à Saint Witz (95)",
       reference: "2600683",
-      buyerName: "Région Île-de-France",
+      buyerName: "Conseil Régional d'Ile-de-France",
       consultationUrl:
-        "https://marches.maximilien.fr/index.php?page=Entreprise.EntrepriseDetailsConsultation&id=942952&orgAcronyme=IDF",
+        "https://marches.maximilien.fr/entreprise/consultation/942952?orgAcronyme=t5y",
+      lotDetailUrl:
+        "https://marches.maximilien.fr/index.php?page=Entreprise.PopUpDetailLots&orgAccronyme=t5y&id=942952&lang=",
+      deadlineAt: "2026-09-18T10:00:00.000Z",
+      lotTitles: [],
+      recoveryDisposition: "recoverable",
     });
   });
 });
 
 describe("createRecoveryPortalSearcher", () => {
-  it("deduplicates candidates collected from every bounded query", async () => {
+  it("sends one bounded query batch and maps portal metadata", async () => {
     const backend = vi.fn(async () => ({
       candidates: [
         {
@@ -96,16 +123,25 @@ describe("createRecoveryPortalSearcher", () => {
           buyerName: target.buyerName,
           consultationUrl:
             "https://www.marches-publics.gouv.fr/app.php/entreprise/consultation/42",
+          deadlineAt: "2026-09-01T10:00:00.000Z",
+          lotTitles: [],
+          recoveryDisposition: "recoverable" as const,
         },
       ],
       blockedExternalHosts: [],
+      requestCount: 3,
     }));
     const search = createRecoveryPortalSearcher(backend);
 
     const result = await search("place", target);
 
-    expect(backend).toHaveBeenCalledTimes(buildRecoverySearchTerms(target).length);
+    expect(backend).toHaveBeenCalledOnce();
+    expect(backend).toHaveBeenCalledWith(
+      "place",
+      buildRecoverySearchTerms(target),
+    );
     expect(result.candidates).toHaveLength(1);
     expect(result.candidates[0]?.portal).toBe("place");
+    expect(result.requestCount).toBe(3);
   });
 });

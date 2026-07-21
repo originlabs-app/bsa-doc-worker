@@ -382,3 +382,41 @@
   `feat/recovery-apply-continuous-audit`, base exacte `origin/main` `046c04e`.
   Implémentation et documentation gelées à `ff3dde0`; le commit de ce
   checkpoint porte le gel final.
+
+## 2026-07-21 — RECOVERY-SEARCH : recherches publiques réelles et matching calibré
+
+- Bénéfice : le recovery retrouve maintenant de vraies consultations sur AW,
+  PLACE et Maximilien depuis leurs index publics, avec l'URL exacte. Un résultat
+  AW qui renvoie vers un portail tiers reste identifié mais bloqué avant tout
+  téléchargement.
+- Endpoints réels : AW `POST /Annonces/lister`; PLACE et Maximilien
+  `GET /?page=Entreprise.EntrepriseAdvancedSearch&searchAnnCons=&keyWord=...`.
+  Maximum 4 requêtes de recherche et 8 requêtes HTTP par portail, timeout 20 s,
+  réponse HTML limitée à 5 MiB, origines exactes allowlistées et redirections
+  même origine seulement. Aucun login, CAPTCHA, Browserless ou appel DB.
+- Matching §3.3 : préfixe titre normalisé/stemmé ou Jaccard ≥ 0,75, acheteur
+  exact ou recouvrement de jetons distinctifs, lots appariés un à un à
+  Jaccard ≥ 0,55, DLRO cohérente pour `strong`, et chapeaux PLACE conservés à
+  confirmer sans au moins deux lots. Les anciens seuils 0,50/0,70 ont été
+  retirés.
+- Vérité réseau : la consultation Maximilien `942952` / `2600683` expose
+  actuellement « Travaux de réfection de l'étanchéité et de chauffage au lycée
+  Léonard de Vinci à Saint Witz (95) », et non le libellé « Restructuration des
+  unités de psychiatrie » fourni dans la mission. La gate utilise donc
+  l'identité réellement servie par le portail, sans inventer de résultat.
+- Gates avant-plan sur `36bb0b1` : `npm run test:ci` 255/255,
+  `npm run typecheck`, `npm run build`, `npm run lint`, puis sonde réseau réelle
+  verte. Sortie intégrale :
+
+```text
+RECOVERY_SEARCH_PROBE_BEGIN
+{"case":"maximilien-942952","portal":"maximilien","decision":"exact","consultationUrl":"https://marches.maximilien.fr/entreprise/consultation/942952?orgAcronyme=t5y","requests":4,"disposition":"recoverable","blockedExternalHost":null,"deadlineStatus":"coherent","lotMatches":0,"placeUmbrellaCompatible":false}
+{"case":"aw-bastion-xv","portal":"aw_solutions","decision":"exact","consultationUrl":"https://www.marches-publics.info/Annonces/MPI-pub-20262001118.htm","requests":1,"disposition":"external_blocked","blockedExternalHost":"plateforme.alsacemarchespublics.eu","deadlineStatus":"coherent","lotMatches":0,"placeUmbrellaCompatible":false}
+{"case":"place-aphp-3031184","portal":"place","decision":"strong","consultationUrl":"https://www.marches-publics.gouv.fr/app.php/entreprise/consultation/3031184?orgAcronyme=x7c","requests":3,"disposition":"recoverable","blockedExternalHost":null,"deadlineStatus":"coherent","lotMatches":3,"placeUmbrellaCompatible":true}
+{"case":"aw-beziers-26emfa16","portal":"aw_solutions","decision":"exact","consultationUrl":"https://www.marches-publics.info/mpiaws/index.cfm?fuseaction=dematEnt.login&type=DCE&IDM=1848852","requests":1,"disposition":"recoverable","blockedExternalHost":null,"deadlineStatus":"coherent","lotMatches":0,"placeUmbrellaCompatible":false}
+{"summary":"PASS","cases":"4/4","networkRequests":9,"browserlessUnits":0,"databaseWrites":0}
+RECOVERY_SEARCH_PROBE_PASS
+```
+
+- Aucun push, merge, deploy, sink, migration ou CLI modifié.
+- RECOVERY-SEARCH GELÉ au `36bb0b1`.

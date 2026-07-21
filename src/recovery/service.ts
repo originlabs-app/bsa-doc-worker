@@ -18,8 +18,6 @@ import { reconcilePortalCandidates } from "./matching.js";
 export interface RecoverySweepConfig {
   mode: RecoveryMode;
   batchSize: number;
-  strongTitleJaccard?: number;
-  titleOnlyJaccard?: number;
 }
 
 export interface RecoverySweepDependencies {
@@ -70,11 +68,16 @@ function safeEvidence(
       portal: result.portal,
       error_code: result.errorCode ?? null,
       blocked_external_host: result.blockedExternalHost ?? null,
+      request_count: result.requestCount ?? null,
       candidates: result.candidates.map((candidate) => ({
         title: candidate.canonicalTitle,
         reference: candidate.reference,
         buyer_name: candidate.buyerName,
         consultation_url: candidate.consultationUrl,
+        deadline_at: candidate.deadlineAt ?? null,
+        lot_titles: candidate.lotTitles ?? [],
+        recovery_disposition: candidate.recoveryDisposition ?? "recoverable",
+        blocked_external_host: candidate.blockedExternalHost ?? null,
       })),
     })),
     matches: matches.map((match) => ({
@@ -86,9 +89,16 @@ function safeEvidence(
       consultation_url: match.candidate.consultationUrl,
       reference_exact: match.referenceExact,
       buyer_exact: match.buyerExact,
+      buyer_matched: match.buyerMatched,
+      buyer_token_overlap: Number(match.buyerTokenOverlap.toFixed(4)),
+      buyer_shared_tokens: match.buyerSharedTokens,
+      title_matched: match.titleMatched,
+      title_prefix_match: match.titlePrefixMatch,
       title_jaccard: Number(match.titleJaccard.toFixed(4)),
       lot_token_hits: match.lotTokenHits,
       lot_title_matches: match.lotTitleMatches,
+      deadline_status: match.deadlineStatus,
+      place_umbrella_compatible: match.placeUmbrellaCompatible,
     })),
   };
 }
@@ -195,14 +205,6 @@ export async function runRecoverySweep(
     const reconciliation = reconcilePortalCandidates(
       target,
       searchResults.flatMap(({ candidates }) => candidates),
-      {
-        ...(config.strongTitleJaccard === undefined
-          ? {}
-          : { strong: config.strongTitleJaccard }),
-        ...(config.titleOnlyJaccard === undefined
-          ? {}
-          : { titleOnly: config.titleOnlyJaccard }),
-      },
     );
     const evidence = safeEvidence(searchResults, reconciliation.evidence);
     for (const searchResult of searchResults) {
@@ -245,6 +247,21 @@ export async function runRecoverySweep(
               : status === "error"
                 ? "error"
                 : "low",
+          evidence,
+        );
+      }
+      continue;
+    }
+
+    if (reconciliation.match.candidate.recoveryDisposition === "external_blocked") {
+      increment(report, "blocked");
+      if (reservation) {
+        await finalize(
+          dependencies.store,
+          reservation.attemptId,
+          "blocked",
+          reconciliation.match.candidate.portal,
+          reconciliation.match.level,
           evidence,
         );
       }

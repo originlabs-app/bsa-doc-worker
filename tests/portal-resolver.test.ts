@@ -7,6 +7,7 @@ import {
   resolveExactPortalConsultation,
   searchAwPublic,
   searchPlacePublic,
+  searchPortalPublicCandidates,
 } from "../src/portal-resolver.js";
 
 describe("resolveExactPortalConsultation", () => {
@@ -240,22 +241,13 @@ describe("public portal searches", () => {
     );
   });
 
-  it("sends one bounded PLACE search with the distinctive term", async () => {
-    const requests: Array<{ url: string; body: string }> = [];
+  it("uses the real public PLACE GET search with the distinctive term", async () => {
+    const requests: Array<{ url: string; method: string }> = [];
     const fetchStub: typeof fetch = async (input, init) => {
       requests.push({
         url: input.toString(),
-        body: String(init?.body),
+        method: init?.method ?? "GET",
       });
-      if (requests.length === 1) {
-        return new Response(null, {
-          status: 302,
-          headers: {
-            location:
-              "/?page=Entreprise.EntrepriseAdvancedSearch&searchAnnCons&keyWord=Erckmann",
-          },
-        });
-      }
       return new Response('<div class="alert">Aucun résultat trouvé</div>', {
         status: 200,
         headers: { "content-type": "text/html" },
@@ -268,16 +260,11 @@ describe("public portal searches", () => {
     );
 
     expect(outcome).toEqual({ type: "not_found", portal: "place" });
-    expect(requests).toHaveLength(2);
+    expect(requests).toHaveLength(1);
     expect(requests[0]?.url).toBe(
-      "https://www.marches-publics.gouv.fr/espace-entreprise/search",
+      "https://www.marches-publics.gouv.fr/?page=Entreprise.EntrepriseAdvancedSearch&searchAnnCons=&keyWord=Erckmann",
     );
-    expect(new URLSearchParams(requests[0]?.body).get("keyWord")).toBe(
-      "Erckmann",
-    );
-    expect(requests[1]?.url).toBe(
-      "https://www.marches-publics.gouv.fr/?page=Entreprise.EntrepriseAdvancedSearch&searchAnnCons&keyWord=Erckmann",
-    );
+    expect(requests[0]?.method).toBe("GET");
   });
 
   it("rejects a PLACE redirect to an unallowlisted host", async () => {
@@ -295,62 +282,85 @@ describe("public portal searches", () => {
     ).rejects.toThrow("PORTAL_SEARCH_REDIRECT_BLOCKED");
   });
 
-  it("expands PLACE to twenty results in the same ephemeral session", async () => {
-    const requests: Array<{ url: string; init?: RequestInit }> = [];
-    const fetchStub: typeof fetch = async (input, init) => {
-      requests.push({ url: input.toString(), ...(init ? { init } : {}) });
+  it("follows only a same-origin PLACE redirect", async () => {
+    const requests: string[] = [];
+    const fetchStub: typeof fetch = async (input) => {
+      requests.push(input.toString());
       if (requests.length === 1) {
         return new Response(null, {
           status: 302,
           headers: {
             location:
-              "/?page=Entreprise.EntrepriseAdvancedSearch&searchAnnCons&keyWord=REGLEMENTAIRES",
-            "set-cookie": "PLACESESSION=fixture; Secure; HttpOnly",
+              "/?page=Entreprise.EntrepriseAdvancedSearch&searchAnnCons=&keyWord=Erckmann",
           },
         });
       }
-      if (requests.length === 2) {
-        return new Response(
-          `<form id="ctl0_ctl1" action="/?page=Entreprise.EntrepriseAdvancedSearch">
-             <input id="PRADO_PAGESTATE" value="fixture-state">
-             <span id="ctl0_CONTENU_PAGE_resultSearch_nombreElement">15</span>
-           </form>`,
-          {
-            status: 200,
-            headers: { "content-type": "text/html" },
-          },
-        );
-      }
-      return new Response(
-        `<div class="item_consultation">
-           <div class="objet-line"><div class="small pull-left truncate">
-             <span title="CONTRÔLES RÈGLEMENTAIRES DES BÂTIMENTS ET ÉQUIPEMENTS POUR LA VILLE">Contrôles</span>
-           </div></div>
-           <a href="https://www.marches-publics.gouv.fr/app.php/entreprise/consultation/3036454">Accéder à la consultation</a>
-         </div>`,
-        {
-          status: 200,
-          headers: { "content-type": "text/html" },
-        },
-      );
+      return new Response('<div class="alert">Aucun résultat trouvé</div>', {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      });
     };
 
     const outcome = await searchPlacePublic(
-      "CONTRÔLES RÈGLEMENTAIRES DES BÂTIMENTS ET ÉQUIPEMENTS POUR L",
+      "Travaux d'extension du groupe scolaire Erckmann Chatrian à S",
       fetchStub,
     );
 
-    expect(outcome.type).toBe("recoverable");
-    expect(requests).toHaveLength(3);
-    expect(requests[1]?.init?.headers).toEqual({
-      Cookie: "PLACESESSION=fixture",
-    });
-    const expandedBody = new URLSearchParams(
-      String(requests[2]?.init?.body),
+    expect(outcome).toEqual({ type: "not_found", portal: "place" });
+    expect(requests).toHaveLength(2);
+  });
+
+  it("caps one portal search at four queries", async () => {
+    const requests: string[] = [];
+    const fetchStub: typeof fetch = async (input) => {
+      requests.push(input.toString());
+      return new Response('<div class="alert">Aucun résultat trouvé</div>', {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      });
+    };
+
+    const result = await searchPortalPublicCandidates(
+      "maximilien",
+      ["un", "deux", "trois", "quatre", "cinq"],
+      fetchStub,
     );
-    expect(expandedBody.get("PRADO_PAGESTATE")).toBe("fixture-state");
-    expect(
-      expandedBody.get("ctl0$CONTENU_PAGE$resultSearch$listePageSizeTop"),
-    ).toBe("20");
+
+    expect(requests).toHaveLength(4);
+    expect(result.requestCount).toBe(4);
+  });
+
+  it("stops a redirect loop after eight requests", async () => {
+    let requests = 0;
+    const fetchStub: typeof fetch = async () => {
+      requests += 1;
+      return new Response(null, {
+        status: 302,
+        headers: {
+          location:
+            "/?page=Entreprise.EntrepriseAdvancedSearch&searchAnnCons=&keyWord=loop",
+        },
+      });
+    };
+
+    await expect(
+      searchPortalPublicCandidates("place", ["loop"], fetchStub),
+    ).rejects.toThrow("PORTAL_SEARCH_REQUEST_LIMIT");
+    expect(requests).toBe(8);
+  });
+
+  it("rejects a search response larger than five MiB", async () => {
+    const fetchStub: typeof fetch = async () =>
+      new Response(new Uint8Array(5 * 1024 * 1024 + 1), {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      });
+
+    await expect(
+      searchPlacePublic(
+        "Travaux d'extension du groupe scolaire Erckmann Chatrian à S",
+        fetchStub,
+      ),
+    ).rejects.toThrow("PORTAL_SEARCH_RESPONSE_TOO_LARGE");
   });
 });

@@ -27,6 +27,9 @@ const exactCandidate: PortalCandidate = {
   buyerName: target.buyerName,
   consultationUrl:
     "https://www.marches-publics.gouv.fr/app.php/entreprise/consultation/42",
+  lotTitles: [],
+  deadlineAt: "2026-09-30T10:00:00.000Z",
+  recoveryDisposition: "recoverable",
 };
 
 const discovery: AdapterDiscovery = {
@@ -126,7 +129,7 @@ describe("runRecoverySweep", () => {
         {
           ...exactCandidate,
           reference: "different",
-          canonicalTitle: "Rénovation partielle d'un gymnase",
+          canonicalTitle: "Rénovation énergétique de l'école Jean Moulin",
         },
       ],
     });
@@ -142,6 +145,41 @@ describe("runRecoverySweep", () => {
     expect(fixture.deps.discover).not.toHaveBeenCalled();
     expect(fixture.pipeline.fetchAndUpload).not.toHaveBeenCalled();
     expect(report.nAmbiguous).toBe(1);
+  });
+
+  it("records an exact external AW listing as blocked and never discovers it", async () => {
+    const fixture = dependencies();
+    const externalCandidate: PortalCandidate = {
+      ...exactCandidate,
+      portal: "aw_solutions",
+      consultationUrl:
+        "https://www.marches-publics.info/Annonces/MPI-pub-20262001118.htm",
+      recoveryDisposition: "external_blocked",
+      blockedExternalHost: "plateforme.alsacemarchespublics.eu",
+    };
+    vi.mocked(fixture.deps.searchPortal).mockImplementation(async (portal) => ({
+      portal,
+      candidates: portal === "aw_solutions" ? [externalCandidate] : [],
+      ...(portal === "aw_solutions"
+        ? { blockedExternalHost: "plateforme.alsacemarchespublics.eu" }
+        : {}),
+    }));
+
+    const report = await runRecoverySweep(
+      { mode: "apply", batchSize: 25 },
+      fixture.deps,
+    );
+
+    expect(fixture.store.finalize).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "blocked",
+        portal: "aw_solutions",
+        decision: "exact",
+      }),
+    );
+    expect(fixture.deps.discover).not.toHaveBeenCalled();
+    expect(fixture.pipeline.fetchAndUpload).not.toHaveBeenCalled();
+    expect(report).toMatchObject({ nBlocked: 1, nFound: 0 });
   });
 
   it("persists one exact manifest and disposes its quarantine", async () => {

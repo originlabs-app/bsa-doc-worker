@@ -12,7 +12,7 @@ import type {
 
 export type RecoveryPublicSearchBackend = (
   portal: RecoveryPortal,
-  query: string,
+  queries: readonly string[],
 ) => Promise<PortalPublicCandidateResult>;
 
 function normalizedTerm(value: string): string {
@@ -25,21 +25,15 @@ export function buildRecoverySearchTerms(target: RecoveryTarget): string[] {
   const add = (value: string) => {
     const term = value.trim().replaceAll(/\s+/g, " ");
     const key = normalizedTerm(term);
-    if (!term || seen.has(key) || terms.length >= 9) return;
+    if (!term || seen.has(key) || terms.length >= 4) return;
     seen.add(key);
     terms.push(term);
   };
 
+  add(buildDistinctiveQuery(target.title));
   add(target.reference);
   add(target.buyerName);
-  add(buildDistinctiveQuery(target.title));
   for (const lotTitle of target.lotTitles) add(buildDistinctiveQuery(lotTitle));
-
-  const titleTokens = target.title
-    .match(/[\p{L}\p{N}]+(?:-[\p{L}\p{N}]+)*/gu)
-    ?.filter((token) => normalizedTerm(token).length >= 5)
-    .sort((left, right) => right.length - left.length) ?? [];
-  for (const token of titleTokens) add(token);
   return terms;
 }
 
@@ -60,20 +54,16 @@ export function createRecoveryPortalSearcher(
     portal: RecoveryPortal,
     target: RecoveryTarget,
   ): Promise<PortalSearchResult> => {
-    const results: PortalPublicCandidateResult[] = [];
-    for (const query of buildRecoverySearchTerms(target)) {
-      results.push(await backend(portal, query));
-    }
-    const candidates = deduplicate(
-      results.flatMap(({ candidates }) => candidates),
-    ).slice(0, 200);
-    const blockedExternalHost = results
-      .flatMap(({ blockedExternalHosts }) => blockedExternalHosts)
-      .sort()[0];
+    const result = await backend(portal, buildRecoverySearchTerms(target));
+    const candidates = deduplicate(result.candidates).slice(0, 200);
+    const blockedExternalHost = result.blockedExternalHosts.sort()[0];
     return {
       portal,
       candidates: candidates.map((candidate) => ({ portal, ...candidate })),
       ...(blockedExternalHost ? { blockedExternalHost } : {}),
+      ...(result.requestCount === undefined
+        ? {}
+        : { requestCount: result.requestCount }),
     };
   };
 }

@@ -10,20 +10,8 @@ describe("loadRecoveryConfig", () => {
     expect(loadRecoveryConfig({})).toMatchObject({
       mode: "off",
       batchSize: 25,
-      strongTitleJaccard: 0.5,
-      titleOnlyJaccard: 0.7,
       maxBytes: 256 * 1024 * 1024,
     });
-  });
-
-  it("validates the supervised threshold override", () => {
-    expect(
-      loadRecoveryConfig({ RECOVERY_STRONG_TITLE_JACCARD: "0.60" })
-        .strongTitleJaccard,
-    ).toBe(0.6);
-    expect(() =>
-      loadRecoveryConfig({ RECOVERY_STRONG_TITLE_JACCARD: "0.30" }),
-    ).toThrow();
   });
 
   it("accepts a delayed Railway start anywhere during the Paris 07h hour", () => {

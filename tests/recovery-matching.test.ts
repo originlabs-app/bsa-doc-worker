@@ -29,91 +29,161 @@ function candidate(
     buyerName: "Ville de Lyon",
     consultationUrl:
       "https://www.marches-publics.gouv.fr/app.php/entreprise/consultation/42",
+    lotTitles: ["Lot 01 étanchéité", "Lot 02 isolation thermique"],
+    deadlineAt: "2026-09-30T10:00:00.000Z",
+    recoveryDisposition: "recoverable",
     ...overrides,
   };
 }
 
-describe("classifyRecoveryCandidate", () => {
-  it("accepts an exact normalized reference", () => {
-    expect(
-      classifyRecoveryCandidate(target, candidate({ reference: "lyon 2026 042" })),
-    ).toMatchObject({ level: "exact", referenceExact: true });
-  });
+const now = new Date("2026-07-21T12:00:00.000Z");
 
-  it("accepts a strong exact-buyer and title match at 0.50", () => {
+describe("classifyRecoveryCandidate", () => {
+  it("accepts an exact normalized reference corroborated by title", () => {
     expect(
       classifyRecoveryCandidate(
         target,
-        candidate({
-          reference: "different",
-          canonicalTitle:
-            "Rénovation énergétique école Jean Jaurès - maîtrise d'œuvre",
-        }),
+        candidate({ reference: "lyon 2026 042" }),
+        { now },
       ),
-    ).toMatchObject({ level: "strong", buyerExact: true });
+    ).toMatchObject({
+      level: "exact",
+      referenceExact: true,
+      titleMatched: true,
+    });
   });
 
-  it("requires two distinct lot confirmations for a title-only strong match", () => {
-    const titleOnlyTarget = {
-      ...target,
-      title: "Réhabilitation école isolation étanchéité chauffage",
-      lotTitles: ["Isolation thermique", "Étanchéité toiture"],
-    };
-    const confirmed = classifyRecoveryCandidate(
-      titleOnlyTarget,
+  it("rejects an echoed exact reference without title or buyer corroboration", () => {
+    const result = classifyRecoveryCandidate(
+      target,
       candidate({
-        reference: "different",
-        buyerName: "Autre acheteur",
-        canonicalTitle:
-          "Réhabilitation école isolation étanchéité chauffage toiture",
+        canonicalTitle: "Fourniture de véhicules utilitaires",
+        buyerName: "Département du Rhône",
+        lotTitles: [],
       }),
+      { now },
     );
-    expect(confirmed).toMatchObject({ level: "strong", lotTitleMatches: 2 });
 
-    const unconfirmed = classifyRecoveryCandidate(
-      { ...titleOnlyTarget, lotTitles: ["Isolation thermique"] },
-      candidate({
-        reference: "different",
-        buyerName: "Autre acheteur",
-        canonicalTitle:
-          "Réhabilitation école isolation étanchéité chauffage toiture",
-      }),
-    );
-    expect(unconfirmed.level).toBe("medium");
+    expect(result.referenceExact).toBe(true);
+    expect(result.level).not.toBe("exact");
   });
 
-  it("never promotes lot tokens alone to strong", () => {
+  it("stems singular and plural in a quasi-exact title prefix", () => {
+    const result = classifyRecoveryCandidate(
+      {
+        ...target,
+        title: "Fourniture et installation de classes modulaires au collège",
+      },
+      candidate({
+        reference: "different",
+        canonicalTitle:
+          "Fourniture et installation de classe modulaire au collège Jean Jaurès",
+        lotTitles: [],
+      }),
+      { now },
+    );
+
+    expect(result).toMatchObject({
+      level: "strong",
+      titleMatched: true,
+      titlePrefixMatch: true,
+      buyerMatched: true,
+    });
+  });
+
+  it("allows an unknown deadline only when two lots confirm the match", () => {
+    const candidateWithLots = candidate({ reference: "different" });
+    delete candidateWithLots.deadlineAt;
+    const withLots = classifyRecoveryCandidate(
+      target,
+      candidateWithLots,
+      { now },
+    );
+    expect(withLots).toMatchObject({
+      level: "strong",
+      deadlineStatus: "unknown",
+      lotTitleMatches: 2,
+    });
+
+    const candidateWithoutLots = candidate({
+      reference: "different",
+      lotTitles: [],
+    });
+    delete candidateWithoutLots.deadlineAt;
+    const withoutLots = classifyRecoveryCandidate(
+      target,
+      candidateWithoutLots,
+      { now },
+    );
+    expect(withoutLots).toMatchObject({
+      level: "medium",
+      deadlineStatus: "unknown",
+      lotTitleMatches: 0,
+    });
+  });
+
+  it("keeps an expired otherwise-strong match at A_CONFIRMER", () => {
     const result = classifyRecoveryCandidate(
       target,
       candidate({
         reference: "different",
-        buyerName: "Autre acheteur",
-        canonicalTitle: "Travaux étanchéité isolation d'un collège",
+        deadlineAt: "2026-01-10T12:00:00.000Z",
       }),
+      { now },
     );
 
-    expect(result.lotTitleMatches).toBe(2);
-    expect(result.level).toBe("medium");
+    expect(result).toMatchObject({ level: "medium", deadlineStatus: "expired" });
   });
 
-  it("keeps observed low-overlap geographic noise low", () => {
-    expect(
-      classifyRecoveryCandidate(
-        target,
-        candidate({
-          reference: "26TT04",
-          buyerName: "Mairie d'Aussillon",
-          canonicalTitle: "Plantation d'arbres à Lyon",
-        }),
-      ).level,
-    ).toBe("low");
+  it.each([
+    ["CHU de Montpellier", "Montpellier Méditerranée Métropole"],
+    ["Ardèche Habitat", "Département de l'Ardèche"],
+    ["Hauts-de-Seine Habitat", "OPH Rives de Seine Habitat"],
+  ])("rejects buyer homonyms: %s / %s", (targetBuyer, candidateBuyer) => {
+    const result = classifyRecoveryCandidate(
+      { ...target, buyerName: targetBuyer, title: "Objet cible totalement distinct" },
+      candidate({
+        reference: "different",
+        buyerName: candidateBuyer,
+        canonicalTitle: "Autre marché sans rapport",
+        lotTitles: [],
+      }),
+      { now },
+    );
+    expect(result.buyerMatched).toBe(false);
+    expect(result.level).not.toBe("strong");
+  });
+
+  it("keeps a PLACE ministry umbrella plus title without lots at A_CONFIRMER", () => {
+    const result = classifyRecoveryCandidate(
+      {
+        ...target,
+        buyerName: "Assistance Publique - Hôpitaux de Paris",
+        title: "Réfection des réseaux de chauffage du site Cochin",
+      },
+      candidate({
+        reference: "different",
+        buyerName: "Ministère de la Santé",
+        canonicalTitle: "Réfection des réseaux de chauffage du site Cochin",
+        lotTitles: [],
+      }),
+      { now },
+    );
+
+    expect(result).toMatchObject({
+      level: "medium",
+      titleMatched: true,
+      buyerMatched: false,
+      placeUmbrellaCompatible: true,
+      lotTitleMatches: 0,
+    });
   });
 });
 
 describe("reconcilePortalCandidates", () => {
   it("fails closed when two incompatible top candidates tie", () => {
     const result = reconcilePortalCandidates(target, [
-      candidate(),
+      candidate({ deadlineAt: "2026-09-30T10:00:00.000Z" }),
       candidate({
         portal: "maximilien",
         reference: "LYON-2026-042",
@@ -121,7 +191,7 @@ describe("reconcilePortalCandidates", () => {
         consultationUrl:
           "https://marches.maximilien.fr/entreprise/consultation/99",
       }),
-    ]);
+    ], { now });
 
     expect(result.outcome).toBe("ambiguous");
   });
