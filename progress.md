@@ -433,3 +433,35 @@ POUR LA BOUCLE / MISSION DE JOUR : câbler cette doctrine dans les prompts
 du worker (readerRoleInstruction + system analyze) = la demande Pierre
 « l'appliquer et l'améliorer, en skill ou prompt system dans le SDK ».
 Merge de la branche docs sans risque (doc seule, zéro code).
+
+--- LOT D : HARDENING CHEMIN MARKET/LOT (branche fix/analyze-lotc-hardening) ---
+Base origin/main b02cdee (LOT A/B/C + fix businessFields requis-nullable).
+Corrige les SIX écarts de sûreté de l'audit Codex, TDD strict (rouge->vert),
+bloquants avant activation ANALYZE_RECORD_TYPES=market|lot :
+1. Grounding citation : chaque champ métier est re-vérifié contre le texte du
+   document désigné (normalisation espaces/casse) ; citation inventée =>
+   champ dégradé absent + log analyze_business_field_degraded, jamais d'exception
+   (src/analyze/grounding.ts, passe service AVANT finalisation + re-check sink).
+2. Montant recoupé : port exact edge citationSupportsLotAmount +
+   parseDocumentaryNumberToken (espaces/NBSP, virgule/point FR, k€/M€/keur) ;
+   montant illisible dans la citation => champ absent.
+3. Evidence complète : schéma businessFields exige documentId ; l'evidence RPC
+   porte {citation, role, fileName} du document source (parité edge
+   LotBusinessFieldEvidence, camelCase fileName comme l'edge ; la priorité de
+   rôle DPGF/AE/CCAP de l'edge ne se transpose pas : le LLM désigne UN document
+   source, documentId inconnu => champ dégradé).
+4. Date calendaire : zod refine round-trip UTC, 2026-99-99/2026-02-30 rejetés.
+5. Retours RPC contrôlés : schémas zod sur les retours materialize (run_id,
+   created, updated, preserved, review_required) et sync (matched, unmatched,
+   locked). sync matched=0 ou unmatched>0 => AnalyzeLotSyncUnmatchedError
+   (ANALYZE_LOT_SYNC_UNMATCHED) AVANT record_ai_spend : queue failed, pas de
+   ledger. Formes invalides => *_INVALID_RESPONSE, fail closed.
+6. Roster prouvé : sources fiables = lots enfants en base (count lu à
+   l'assemblage quand mère éligible) + analysis_lot_number des documents ;
+   produits < attendus => matérialisation refusée (fallback sync seul + log
+   analyze_lot_roster_incomplete). Sans source fiable : champ rosterComplete
+   (bool requis du LLM, équivalent minimal du roster canonique edge) sinon
+   fallback sync + log analyze_lot_roster_unproven.
+Interdits respectés : peekCandidates intact, config ANALYZE_RECORD_TYPES intact.
+Gates : typecheck OK, test:ci 351/351 (baseline 301, +50), lint OK, build OK.
+Pas de push/merge (orchestrateur).

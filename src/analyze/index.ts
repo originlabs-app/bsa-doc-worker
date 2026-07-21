@@ -2,6 +2,7 @@ export * from "./agent.js";
 export * from "./agent-types.js";
 export * from "./config.js";
 export * from "./domain.js";
+export * from "./grounding.js";
 export * from "./learning.js";
 export * from "./redhibitory.js";
 export * from "./scoring.js";

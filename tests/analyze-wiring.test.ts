@@ -19,6 +19,7 @@ const assembly: AnalyzeDossierAssembly = {
   recordType: "market",
   lot: null,
   autoMaterializeLots: false,
+  existingLotCount: 0,
   existingScore: 72,
   deadlineDate: null,
   coverage: {
@@ -68,6 +69,7 @@ const learning: AnalyzeLearningSnapshot = {
 };
 
 const agentOutput = {
+  rosterComplete: true,
   marketSummary: "Marché de rénovation alloti.",
   units: [{
     unit: { kind: "lot" as const, number: "1", title: "Rénovation" },

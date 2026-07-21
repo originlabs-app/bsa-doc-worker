@@ -32,6 +32,13 @@ export interface AnalyzeDossierAssembly {
    * server-side, so a human takeover between read and write still wins.
    */
   autoMaterializeLots: boolean;
+  /**
+   * Number of live lot children already materialized under this tender in the
+   * DB at assembly time (0 for direct lots / standalone). LOT D roster gate:
+   * an analysis producing fewer lots than the DB already holds must not
+   * materialize (the RPC would flip the missing lots to review_required).
+   */
+  existingLotCount: number;
   existingScore: number | null;
   deadlineDate: string | null;
   dossier: AnalyzeDossierInput;

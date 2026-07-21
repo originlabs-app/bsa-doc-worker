@@ -97,6 +97,7 @@ describe("computeFinalScoreFromCriteria", () => {
 describe("AgentAnalysisDraftSchema", () => {
   it("rejects an unknown criterion that the agent credited", () => {
     const invalid = {
+      rosterComplete: true,
       marketSummary: "Marché test",
       units: [{
         ...lot({ number: "1", title: "Lot unique", metier: 30 }),
@@ -106,11 +107,25 @@ describe("AgentAnalysisDraftSchema", () => {
 
     expect(AgentAnalysisDraftSchema.safeParse(invalid).success).toBe(false);
   });
+
+  it("requires the explicit roster completeness declaration (LOT D)", () => {
+    const withoutRoster = {
+      marketSummary: "Marché test",
+      units: [lot({ number: "1", title: "Lot unique", metier: 30 })],
+    };
+
+    expect(AgentAnalysisDraftSchema.safeParse(withoutRoster).success).toBe(false);
+    expect(AgentAnalysisDraftSchema.safeParse({
+      ...withoutRoster,
+      rosterComplete: false,
+    }).success).toBe(true);
+  });
 });
 
 describe("finalizeAnalysisDraft", () => {
   it("uses the best accessible lot instead of averaging lots", () => {
     const draft = AgentAnalysisDraftSchema.parse({
+      rosterComplete: true,
       marketSummary: "Deux lots accessibles.",
       units: [
         lot({ number: "1", title: "Petit œuvre", metier: 15 }),
@@ -132,6 +147,7 @@ describe("finalizeAnalysisDraft", () => {
 
   it("blocks a lot in code even when the agent proposed a favorable verdict", () => {
     const draft = AgentAnalysisDraftSchema.parse({
+      rosterComplete: true,
       marketSummary: "Un lot techniquement séduisant mais bloqué.",
       units: [
         lot({
@@ -171,6 +187,7 @@ describe("finalizeAnalysisDraft", () => {
 
   it("forces the whole tender to zero only when every lot is blocked", () => {
     const draft = AgentAnalysisDraftSchema.parse({
+      rosterComplete: true,
       marketSummary: "Tous les lots exigent une qualification absente.",
       units: [
         lot({
@@ -208,6 +225,7 @@ describe("applyDeadlineGate", () => {
   function analysis(): FinalizedAnalysis {
     return finalizeAnalysisDraft({
       draft: AgentAnalysisDraftSchema.parse({
+        rosterComplete: true,
         marketSummary: "Deux lots accessibles.",
         units: [
           lot({ number: "1", title: "Petit œuvre", metier: 15 }),
@@ -381,14 +399,61 @@ describe("shouldAutoMaterializeTenderLots", () => {
 
 describe("LotBusinessFieldsSchema", () => {
   const valid = {
-    summaryDescription: { value: "Gros œuvre", citation: "Le lot comprend le gros œuvre" },
-    contractDuration: { value: "12 mois", citation: "Durée du marché : 12 mois" },
-    workStartDate: { value: "2026-09-01", citation: "Démarrage le 1er septembre 2026" },
-    estimatedValue: { value: 250_000, citation: "Montant estimé : 250 000 € HT" },
+    summaryDescription: {
+      value: "Gros œuvre",
+      citation: "Le lot comprend le gros œuvre",
+      documentId: "cctp-1",
+    },
+    contractDuration: {
+      value: "12 mois",
+      citation: "Durée du marché : 12 mois",
+      documentId: "ccap-1",
+    },
+    workStartDate: {
+      value: "2026-09-01",
+      citation: "Démarrage le 1er septembre 2026",
+      documentId: "ccap-1",
+    },
+    estimatedValue: {
+      value: 250_000,
+      citation: "Montant estimé : 250 000 € HT",
+      documentId: "dpgf-1",
+    },
   };
 
   it("accepts a fully cited set of business fields", () => {
     expect(LotBusinessFieldsSchema.parse(valid)).toEqual(valid);
+  });
+
+  it("requires the source documentId on every present business field (LOT D)", () => {
+    expect(LotBusinessFieldsSchema.safeParse({
+      ...valid,
+      summaryDescription: {
+        value: "Gros œuvre",
+        citation: "Le lot comprend le gros œuvre",
+      },
+    }).success).toBe(false);
+  });
+
+  it("rejects non-calendar dates that match the shape regex (LOT D)", () => {
+    for (const value of ["2026-99-99", "2026-02-30", "2026-13-01", "2026-00-10"]) {
+      expect(LotBusinessFieldsSchema.safeParse({
+        ...valid,
+        workStartDate: {
+          value,
+          citation: "Démarrage",
+          documentId: "ccap-1",
+        },
+      }).success).toBe(false);
+    }
+    expect(LotBusinessFieldsSchema.safeParse({
+      ...valid,
+      workStartDate: {
+        value: "2028-02-29",
+        citation: "Démarrage",
+        documentId: "ccap-1",
+      },
+    }).success).toBe(true);
   });
 
   it("accepts null fields for values absent from the documents", () => {

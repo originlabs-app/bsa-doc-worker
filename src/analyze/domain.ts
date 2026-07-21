@@ -157,6 +157,7 @@ export function finalizeAnalysisDraft(input: {
     score: recommended?.score ?? 0,
     reason: recommended?.unit.rationale ?? input.draft.marketSummary,
     forcedZero: allBlocked,
+    rosterComplete: input.draft.rosterComplete,
     marketSummary: input.draft.marketSummary,
     recommendedLot,
     watchpoints: evaluated.flatMap((entry) => [

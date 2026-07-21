@@ -60,6 +60,7 @@ const dossier: AnalyzeDossierInput = {
 };
 
 const validOutput = {
+  rosterComplete: true,
   marketSummary: "Marché de rénovation de deux bâtiments.",
   units: [{
     unit: { kind: "market" as const },
@@ -172,6 +173,7 @@ describe("runDceAnalyst", () => {
       ],
     };
     const lotOutput = {
+      rosterComplete: true,
       marketSummary: "Marché en deux lots.",
       units: ["1", "2"].map((number) => ({
         ...validOutput.units[0],
