@@ -77,6 +77,7 @@ function unit(number: string, title: string, metier: number) {
   return {
     unit: { kind: "lot" as const, number, title },
     proposedVerdict: "favorable" as const,
+    businessFields: null,
     rationale: "Le lot " + number + " est adapté.",
     criteria: {
       metier,

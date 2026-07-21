@@ -45,6 +45,7 @@ function lot(input: {
   return {
     unit: { kind: "lot", number: input.number, title: input.title },
     proposedVerdict: "favorable",
+    businessFields: null,
     rationale: `Le lot ${input.number} correspond au métier.`,
     criteria: {
       metier: input.metier,
