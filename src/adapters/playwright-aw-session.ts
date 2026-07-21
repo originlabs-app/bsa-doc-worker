@@ -6,6 +6,7 @@ import {
 } from "playwright-core";
 
 import type { RecoveryRequest } from "../contracts.js";
+import type { WorkerLogger } from "../logger.js";
 import {
   AwAdapterError,
   type AwBrowserDiscovery,
@@ -56,6 +57,7 @@ export interface PlaywrightAwSessionOptions {
   awPortalPassword: string;
   timeoutMs?: number;
   captchaBudget?: AwCaptchaSolveBudget;
+  logger?: WorkerLogger;
 }
 
 function buildBrowserlessEndpoint(token: string): string {
@@ -77,16 +79,98 @@ function extractConsultationId(rawUrl: string): string {
   );
 }
 
+// The Browserless.solveCaptcha CDP command is bounded independently of the
+// page timeout so a hanging solver can never stall a whole attempt.
+const CAPTCHA_SOLVE_COMMAND_TIMEOUT_MS = 30_000;
+
+export interface AwCaptchaSolveVerdict {
+  solved: boolean;
+  detail: string;
+}
+
+interface RawBrowserlessSolveResult {
+  found?: boolean;
+  solved?: boolean;
+  error?: string;
+}
+
+interface MinimalCdpSession {
+  send(method: string): Promise<unknown>;
+  detach(): Promise<void>;
+}
+
+// Exactly ONE explicit Browserless.solveCaptcha call — no retry loop. It
+// never throws: the #texteCaptcha field value stays the single source of
+// truth, this verdict only feeds diagnostics and the failure message.
+export async function solveAwCaptchaOnce(
+  page: Page,
+  timeoutMs: number,
+): Promise<AwCaptchaSolveVerdict> {
+  let session: MinimalCdpSession | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    session = (await page
+      .context()
+      .newCDPSession(page)) as unknown as MinimalCdpSession;
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(
+        () => reject(new Error("solve command timeout")),
+        Math.min(timeoutMs, CAPTCHA_SOLVE_COMMAND_TIMEOUT_MS),
+      );
+    });
+    const raw = (await Promise.race([
+      session.send("Browserless.solveCaptcha"),
+      timeout,
+    ])) as RawBrowserlessSolveResult | undefined;
+    if (raw?.solved === true) {
+      return { solved: true, detail: "browserless_solved" };
+    }
+    if (raw?.found === false) {
+      return { solved: false, detail: "captcha_not_recognized_by_browserless" };
+    }
+    return {
+      solved: false,
+      detail: raw?.error
+        ? `browserless_error:${raw.error}`.slice(0, 200)
+        : "browserless_unsolved",
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "unknown";
+    return {
+      solved: false,
+      detail: `cdp_unavailable:${message}`.slice(0, 200),
+    };
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    await session?.detach().catch(() => undefined);
+  }
+}
+
 export async function waitForCaptchaIfPresent(
   page: Page,
   timeoutMs: number,
   budget: AwCaptchaSolveBudget,
+  logger?: WorkerLogger,
 ): Promise<void> {
   const captchaField = page.locator("#texteCaptcha").first();
   if ((await captchaField.count()) === 0) return;
   const currentValue = await captchaField.inputValue().catch(() => "");
   if (currentValue.trim().length > 0) return;
-  budget.commitSolve();
+  logger?.info("recovery_aw_captcha_detected", {
+    portal: "aw_solutions",
+    wall: "aw_image_captcha",
+  });
+  try {
+    budget.commitSolve();
+  } catch (error) {
+    logger?.info("recovery_aw_captcha_unsolved", {
+      portal: "aw_solutions",
+      wall: "aw_image_captcha",
+      detail: "solve_budget_exhausted",
+    });
+    throw error;
+  }
+  const verdict = await solveAwCaptchaOnce(page, timeoutMs);
   try {
     await page.waitForFunction(
       () => {
@@ -97,12 +181,23 @@ export async function waitForCaptchaIfPresent(
       { timeout: timeoutMs },
     );
   } catch {
+    logger?.info("recovery_aw_captcha_unsolved", {
+      portal: "aw_solutions",
+      wall: "aw_image_captcha",
+      detail: verdict.detail,
+      solver_solved: verdict.solved,
+    });
     throw new AwAdapterError(
       "CAPTCHA_UNSOLVED",
       true,
-      "Browserless did not solve the AW CAPTCHA in time",
+      `Browserless did not solve the AW CAPTCHA (${verdict.detail})`,
     );
   }
+  logger?.info("recovery_aw_captcha_solved", {
+    portal: "aw_solutions",
+    wall: "aw_image_captcha",
+    detail: verdict.detail,
+  });
 }
 
 async function waitForAwEntrySurface(
@@ -295,17 +390,22 @@ export class PlaywrightAwBrowserSession implements AwBrowserSession {
     let browser: Browser | undefined;
     const captchaBudget =
       this.options.captchaBudget ?? new AwCaptchaSolveBudget();
+    // Names the flow step in every unexpected failure so a prod 'error'
+    // attempt is never mute about where AW actually broke.
+    let step = "connect";
     try {
       browser = await chromium.connectOverCDP(
         buildBrowserlessEndpoint(this.options.browserlessToken),
         { timeout: this.timeoutMs },
       );
+      step = "goto";
       const context = browser.contexts()[0] ?? (await browser.newContext());
       const page = context.pages()[0] ?? (await context.newPage());
       await page.goto(request.providedUrl, {
         waitUntil: "domcontentloaded",
         timeout: this.timeoutMs,
       });
+      step = "entry_surface";
       await waitForAwEntrySurface(page, this.timeoutMs);
 
       const anonymousButton = page.getByText(/RETRAIT ANONYME/i).first();
@@ -322,16 +422,24 @@ export class PlaywrightAwBrowserSession implements AwBrowserSession {
           await waitForAwEntrySurface(page, this.timeoutMs);
         }
       }
-      await waitForCaptchaIfPresent(page, this.timeoutMs, captchaBudget);
+      step = "captcha";
+      await waitForCaptchaIfPresent(
+        page,
+        this.timeoutMs,
+        captchaBudget,
+        this.options.logger,
+      );
 
       let dceCompletChosen = false;
       if (await anonymousButton.isVisible().catch(() => false)) {
+        step = "anonymous_withdrawal";
         await waitForOptionalNavigation(
           page,
           () => anonymousButton.click(),
           this.timeoutMs,
         );
       } else {
+        step = "authenticate";
         await clickChoixDceIdentificationIfPrompted(page, this.timeoutMs);
         await authenticateAwIfPrompted(
           page,
@@ -347,9 +455,16 @@ export class PlaywrightAwBrowserSession implements AwBrowserSession {
             this.timeoutMs,
           );
         }
-        await waitForCaptchaIfPresent(page, this.timeoutMs, captchaBudget);
+        step = "captcha";
+        await waitForCaptchaIfPresent(
+          page,
+          this.timeoutMs,
+          captchaBudget,
+          this.options.logger,
+        );
       }
 
+      step = "lot_selection";
       const lotForm = locateAwLotSelectionForm(page);
       const completeDceWithoutLotForm =
         dceCompletChosen && (await lotForm.count()) === 0;
@@ -373,6 +488,7 @@ export class PlaywrightAwBrowserSession implements AwBrowserSession {
         );
       }
 
+      step = "listing";
       const sourceUrl = new URL(request.providedUrl);
       const cookies = await context.cookies([sourceUrl.origin]);
       return {
@@ -390,10 +506,11 @@ export class PlaywrightAwBrowserSession implements AwBrowserSession {
       };
     } catch (error) {
       if (error instanceof AwAdapterError) throw error;
+      const message = error instanceof Error ? error.message : String(error);
       throw new AwAdapterError(
         "ADAPTER_FAILURE",
         true,
-        "Browserless AW discovery failed",
+        `Browserless AW discovery failed at ${step}: ${message}`.slice(0, 300),
       );
     } finally {
       await browser?.close().catch(() => undefined);

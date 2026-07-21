@@ -142,6 +142,7 @@ function createDependencies(
         awPortalEmail: config.awPortalEmail!,
         awPortalPassword: config.awPortalPassword!,
         captchaBudget,
+        logger,
       }),
     ),
     place: new PlaceAdapter(

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { AwAdapterError } from "../src/adapters/aw-solutions.js";
 import type { AdapterDiscovery } from "../src/ports.js";
 import type {
   PortalCandidate,
@@ -231,5 +232,66 @@ describe("runRecoverySweep", () => {
     );
     expect(report.nError).toBe(1);
     expect(report.nNotFound).toBe(0);
+  });
+});
+
+describe("runRecoverySweep failure evidence", () => {
+  it("records the CAPTCHA wall detail in the blocked attempt evidence", async () => {
+    const fixture = dependencies();
+    vi.mocked(fixture.deps.discover).mockRejectedValueOnce(
+      new AwAdapterError(
+        "CAPTCHA_UNSOLVED",
+        true,
+        "Browserless did not solve the AW CAPTCHA (captcha_not_recognized_by_browserless)",
+      ),
+    );
+
+    const report = await runRecoverySweep(
+      { mode: "apply", batchSize: 25 },
+      fixture.deps,
+    );
+
+    expect(report.nBlocked).toBe(1);
+    expect(fixture.store.finalize).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "blocked",
+        decision: "blocked",
+        evidence: expect.objectContaining({
+          failure: {
+            reason_code: "CAPTCHA_UNSOLVED",
+            retryable: true,
+            message: expect.stringContaining(
+              "captcha_not_recognized_by_browserless",
+            ) as unknown as string,
+          },
+        }),
+      }),
+    );
+  });
+
+  it("records an unknown failure message in the error attempt evidence", async () => {
+    const fixture = dependencies();
+    vi.mocked(fixture.deps.discover).mockRejectedValueOnce(
+      new Error("socket hang up"),
+    );
+
+    const report = await runRecoverySweep(
+      { mode: "apply", batchSize: 25 },
+      fixture.deps,
+    );
+
+    expect(report.nError).toBe(1);
+    expect(fixture.store.finalize).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "error",
+        evidence: expect.objectContaining({
+          failure: {
+            reason_code: null,
+            retryable: null,
+            message: "socket hang up",
+          },
+        }),
+      }),
+    );
   });
 });
