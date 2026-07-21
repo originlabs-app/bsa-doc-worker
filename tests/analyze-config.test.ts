@@ -10,6 +10,7 @@ describe("loadAnalyzeConfig", () => {
       maxSteps: 8,
       maxOutputTokens: 8_192,
       deadlineMinDays: 15,
+      recordTypes: ["standalone"],
       openRouterApiKey: undefined,
     });
   });
@@ -22,6 +23,30 @@ describe("loadAnalyzeConfig", () => {
     expect(() => loadAnalyzeConfig({ DLRO_MIN_DAYS: "abc" })).toThrow(
       "DLRO_MIN_DAYS",
     );
+  });
+
+  it("keeps the standalone perimeter when ANALYZE_RECORD_TYPES is blank", () => {
+    expect(loadAnalyzeConfig({ ANALYZE_RECORD_TYPES: "   " }).recordTypes)
+      .toEqual(["standalone"]);
+  });
+
+  it("parses a multi-value perimeter and deduplicates it", () => {
+    expect(loadAnalyzeConfig({
+      ANALYZE_RECORD_TYPES: " standalone , market ,standalone",
+    }).recordTypes).toEqual(["standalone", "market"]);
+  });
+
+  it("accepts the full lot perimeter", () => {
+    expect(loadAnalyzeConfig({
+      ANALYZE_RECORD_TYPES: "standalone,market,lot",
+    }).recordTypes).toEqual(["standalone", "market", "lot"]);
+  });
+
+  it("rejects a perimeter value outside standalone, market, lot", () => {
+    expect(() => loadAnalyzeConfig({ ANALYZE_RECORD_TYPES: "standalone,parent" }))
+      .toThrow("ANALYZE_RECORD_TYPES");
+    expect(() => loadAnalyzeConfig({ ANALYZE_RECORD_TYPES: ",," }))
+      .toThrow("ANALYZE_RECORD_TYPES");
   });
 
   it("requires OpenRouter only when analysis is enabled", () => {
