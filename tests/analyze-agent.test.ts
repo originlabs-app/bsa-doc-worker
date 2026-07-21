@@ -64,6 +64,7 @@ const validOutput = {
   units: [{
     unit: { kind: "market" as const },
     proposedVerdict: "favorable" as const,
+    businessFields: null,
     rationale: "Le besoin correspond au métier de l'entreprise.",
     criteria: {
       metier: 30,

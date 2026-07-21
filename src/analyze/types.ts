@@ -72,7 +72,9 @@ export const AnalysisUnitDraftSchema = z.object({
   criteria: CriterionScoresSchema,
   unknownCriteria: z.array(CriterionKeySchema).max(5),
   summary: RichSummarySchema,
-  businessFields: LotBusinessFieldsSchema.nullable().optional(),
+  // Strict structured-output schemas (OpenAI/Azure) require every property
+  // to be listed in `required`: the field must be present, null when absent.
+  businessFields: LotBusinessFieldsSchema.nullable(),
   requiredQualifications: z.array(z.object({
     label: z.string().trim().min(1).max(500),
     sourceDocumentId: z.string().trim().min(1).max(200),

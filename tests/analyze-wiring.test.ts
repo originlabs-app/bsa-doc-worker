@@ -72,6 +72,7 @@ const agentOutput = {
   units: [{
     unit: { kind: "lot" as const, number: "1", title: "Rénovation" },
     proposedVerdict: "favorable" as const,
+    businessFields: null,
     rationale: "Le lot correspond exactement au métier.",
     criteria: {
       metier: 30,

@@ -753,6 +753,7 @@ describe("Supabase ANALYZE shadow integration", () => {
             units: [{
               unit: { kind: "lot", number: "1", title: "Rénovation" },
               proposedVerdict: "favorable",
+              businessFields: null,
               rationale: "Le besoin correspond au métier.",
               criteria: {
                 metier: 30,
@@ -848,6 +849,7 @@ describe("Supabase ANALYZE shadow integration", () => {
             units: [{
               unit: { kind: "lot", number: "1", title: "Rénovation" },
               proposedVerdict: "favorable",
+              businessFields: null,
               rationale: "Le besoin correspond au métier.",
               criteria: {
                 metier: 30,
