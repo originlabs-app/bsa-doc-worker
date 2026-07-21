@@ -6,6 +6,7 @@ import type {
   AnalyzeLearningSnapshot,
   AnalyzeUsage,
 } from "./agent-types.js";
+import { documentLotNumbers, runChunkedDceAnalyst } from "./chunking.js";
 import type { AnalyzeConfig, AnalyzeMode } from "./config.js";
 import {
   applyDeadlineGate,
@@ -265,6 +266,13 @@ export async function runAnalyzeService(input: {
   dossier: AnalyzeDossierInput;
   deadlineDate?: string | null;
   lot?: AnalyzeLotContext | null;
+  /**
+   * LOT H — live lot children already in DB (assembly.existingLotCount).
+   * Combined with the document lot numbers it sizes the expected roster: a
+   * mother whose roster exceeds config.unitsPerCall is analyzed in chunks so
+   * the expected output of every call fits in maxOutputTokens.
+   */
+  expectedLotCount?: number | null;
   client: AgentGenerationClient;
   recallLearning: () => Promise<AnalyzeLearningSnapshot>;
   sink?: AnalysisResultSink;
@@ -278,15 +286,37 @@ export async function runAnalyzeService(input: {
   }
 
   const learning = await input.recallLearning();
-  const generated = await runDceAnalyst({
-    dossier: input.dossier,
-    learning,
-    client: input.client,
-    config: {
-      maxSteps: input.config.maxSteps,
-      maxOutputTokens: input.config.maxOutputTokens,
-    },
-  });
+  // LOT H dispatch: direct lots and small rosters keep the single-call path
+  // untouched; only a mother whose expected roster exceeds the per-call
+  // budget goes through framing + chunk calls.
+  const expectedRosterSize = Math.max(
+    input.expectedLotCount ?? 0,
+    documentLotNumbers(input.dossier).length,
+  );
+  const chunked = !input.lot && !input.dossier.targetLot &&
+    expectedRosterSize > input.config.unitsPerCall;
+  const generated = chunked
+    ? await runChunkedDceAnalyst({
+      dossier: input.dossier,
+      learning,
+      client: input.client,
+      config: {
+        maxSteps: input.config.maxSteps,
+        maxOutputTokens: input.config.maxOutputTokens,
+      },
+      unitsPerCall: input.config.unitsPerCall,
+      expectedLotCount: expectedRosterSize,
+      ...(input.logger ? { logger: input.logger } : {}),
+    })
+    : await runDceAnalyst({
+      dossier: input.dossier,
+      learning,
+      client: input.client,
+      config: {
+        maxSteps: input.config.maxSteps,
+        maxOutputTokens: input.config.maxOutputTokens,
+      },
+    });
   const now = input.now ?? (() => new Date());
   // LOT D: degrade ungrounded business fields BEFORE finalization, so the
   // stored analysis details and the RPC payloads never carry an unproven

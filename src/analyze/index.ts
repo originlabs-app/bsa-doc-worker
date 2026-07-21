@@ -1,5 +1,6 @@
 export * from "./agent.js";
 export * from "./agent-types.js";
+export * from "./chunking.js";
 export * from "./config.js";
 export * from "./domain.js";
 export * from "./grounding.js";

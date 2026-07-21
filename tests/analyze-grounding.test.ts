@@ -279,6 +279,7 @@ describe("runAnalyzeService business-field grounding", () => {
     model: "openai/gpt-5.6-terra",
     maxSteps: 8,
     maxOutputTokens: 8_192,
+    unitsPerCall: 8,
     deadlineMinDays: 15,
     recordTypes: ["market"],
     openRouterApiKey: "test",

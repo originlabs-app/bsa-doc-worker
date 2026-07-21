@@ -284,6 +284,9 @@ export async function runAnalyzeOneShot(
         dossier: assembly.dossier,
         deadlineDate: assembly.deadlineDate,
         lot: assembly.lot,
+        // LOT H: DB lot children count feeds the expected roster size that
+        // decides the chunked path on large allotted mothers.
+        expectedLotCount: assembly.existingLotCount,
         client: dependencies.client,
         recallLearning: () => dependencies.recallLearning(assembly),
         ...(sink ? { sink } : {}),
