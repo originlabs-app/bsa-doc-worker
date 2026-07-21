@@ -102,6 +102,7 @@ function unit(number: string, title: string, metier: number) {
 }
 
 const agentOutput = {
+  rosterComplete: true,
   marketSummary: "Marché de rénovation en deux lots.",
   units: [
     unit("1", "Gros œuvre", 30),

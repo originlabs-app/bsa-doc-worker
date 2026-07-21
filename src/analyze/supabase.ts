@@ -11,8 +11,13 @@ import {
   DEFAULT_ANALYZE_RECORD_TYPES,
   type AnalyzeRecordType,
 } from "./config.js";
-import type { AnalysisWritePayload } from "./service.js";
-import { LotBusinessFieldsSchema, type LotBusinessFields } from "./types.js";
+import type { AnalyzeDocumentInput } from "./agent-types.js";
+import { groundBusinessField } from "./grounding.js";
+import {
+  normalizeLotNumberValue,
+  type AnalysisWritePayload,
+} from "./service.js";
+import type { LotBusinessFields } from "./types.js";
 import type {
   AnalyzeApplyStore,
   AnalyzeAssemblyReport,
@@ -196,6 +201,27 @@ async function listQualifications(
   return Array.isArray(data) ? data : [];
 }
 
+// LOT D roster source: live lot children already materialized in the DB.
+async function countExistingLots(
+  client: AnalyzeSupabaseClient,
+  parentTenderId: string,
+): Promise<number> {
+  const result = await (client.from("tender") as {
+    select(columns: string): {
+      eq(column: string, value: string): {
+        eq(column: string, value: string): {
+          is(column: string, value: null): Promise<SupabaseResult>;
+        };
+      };
+    };
+  }).select("id")
+    .eq("parent_tender_id", parentTenderId)
+    .eq("record_type", "lot")
+    .is("deleted_at", null);
+  const data = checked(result, "ANALYZE_EXISTING_LOTS_READ_FAILED");
+  return Array.isArray(data) ? data.length : 0;
+}
+
 async function listDocuments(
   client: AnalyzeSupabaseClient,
   tenderId: string,
@@ -308,6 +334,21 @@ async function assembleCandidate(
     throw new Error("ANALYZE_NO_READABLE_DOCUMENTS");
   }
 
+  const autoMaterializeLots = shouldAutoMaterializeTenderLots({
+    source: tender.source,
+    status: tender.status,
+    record_type: tender.record_type,
+    lot_structure_mode: tender.lot_structure_mode,
+    lot_structure_origin: tender.lot_structure_origin,
+    lot_structure_locked_at: tender.lot_structure_locked_at,
+  });
+  // The roster gate only matters when a materialization can happen: the
+  // children count is read exactly then, at assembly time (the RPC re-checks
+  // its own guards server-side anyway).
+  const existingLotCount = autoMaterializeLots
+    ? await countExistingLots(client, candidate.tenderId)
+    : 0;
+
   return {
     status: "ready",
     assembly: {
@@ -315,14 +356,8 @@ async function assembleCandidate(
       companyId: tender.company_id,
       recordType: tender.record_type,
       lot: lotContext,
-      autoMaterializeLots: shouldAutoMaterializeTenderLots({
-        source: tender.source,
-        status: tender.status,
-        record_type: tender.record_type,
-        lot_structure_mode: tender.lot_structure_mode,
-        lot_structure_origin: tender.lot_structure_origin,
-        lot_structure_locked_at: tender.lot_structure_locked_at,
-      }),
+      autoMaterializeLots,
+      existingLotCount,
       existingScore: finiteNumber(tender.relevance_score),
       // Same coalesce order as the edge toScoringTender (scorer.ts:166-168).
       deadlineDate: nonBlank(tender.deadline_date) ??
@@ -407,29 +442,62 @@ const BUSINESS_FIELD_MAPPING = [
   ["estimatedValue", "estimated_value", "montant"],
 ] as const;
 
+interface BusinessFieldContext {
+  documents: readonly AnalyzeDocumentInput[];
+  log?: (event: string, data: Record<string, unknown>) => void;
+}
+
 /**
  * Presence-based projection of the documentary business fields: a key is sent
- * to the RPCs only when the field is present AND passes the strict schema
- * again (defensive re-validation). Anything invalid — non-positive amount,
- * blank citation, malformed date — degrades to an ABSENT key: the RPC would
- * reject the whole sync with 23514 otherwise, and an absent key simply leaves
- * the column untouched.
+ * to the RPCs only when the field is present AND re-grounded against the
+ * assembled dossier (LOT D, defensive re-validation on top of the service
+ * pass): strict schema, known documentId, citation found in THAT document,
+ * amount readable in the citation. Anything unproven degrades to an ABSENT
+ * key (dedicated log, never an exception): the RPC would reject the whole
+ * sync with 23514 otherwise, and an absent key leaves the column untouched.
+ * Edge parity (LotBusinessFieldEvidence): each evidence entry carries the
+ * role/fileName of the source document next to the citation. The edge role
+ * priority (DPGF/AE/CCAP per field) does not transpose here: the worker LLM
+ * designates ONE source document per field, so there is no multi-extraction
+ * choice to arbitrate.
  */
-function businessFieldProjection(fields: LotBusinessFields | null | undefined): {
+function businessFieldProjection(
+  fields: LotBusinessFields | null | undefined,
+  context: BusinessFieldContext,
+): {
   columns: Record<string, string | number>;
-  evidence: Record<string, { citation: string }>;
+  evidence: Record<
+    string,
+    { citation: string; role: string; fileName: string }
+  >;
 } {
   const columns: Record<string, string | number> = {};
-  const evidence: Record<string, { citation: string }> = {};
+  const evidence: Record<
+    string,
+    { citation: string; role: string; fileName: string }
+  > = {};
   if (!fields) return { columns, evidence };
   for (const [field, column, evidenceKey] of BUSINESS_FIELD_MAPPING) {
-    const schema = LotBusinessFieldsSchema.shape[field] as z.ZodType<
-      { value: string | number; citation: string } | null
-    >;
-    const parsed = schema.safeParse(fields[field]);
-    if (!parsed.success || parsed.data === null) continue;
-    columns[column] = parsed.data.value;
-    evidence[evidenceKey] = { citation: parsed.data.citation };
+    const grounding = groundBusinessField(field, fields[field], context.documents);
+    if (grounding === null) continue;
+    if (!grounding.ok) {
+      const entry = fields[field];
+      context.log?.("analyze_business_field_degraded", {
+        field,
+        reason: grounding.reason,
+        document_id: entry && typeof entry === "object" &&
+            typeof (entry as { documentId?: unknown }).documentId === "string"
+          ? (entry as { documentId: string }).documentId
+          : null,
+      });
+      continue;
+    }
+    columns[column] = grounding.value;
+    evidence[evidenceKey] = {
+      citation: grounding.citation,
+      role: grounding.document.role,
+      fileName: grounding.document.fileName,
+    };
   }
   return { columns, evidence };
 }
@@ -439,8 +507,9 @@ function businessFieldProjection(fields: LotBusinessFields | null | undefined): 
 function lotRpcCandidate(
   lot: AnalysisWritePayload["lots"][number],
   order: number,
+  context: BusinessFieldContext,
 ): Record<string, unknown> {
-  const business = businessFieldProjection(lot.businessFields);
+  const business = businessFieldProjection(lot.businessFields, context);
   return {
     source_lot_key: sourceLotKeyOf(lot),
     lot_number: lot.number,
@@ -477,6 +546,86 @@ const LOT_MATERIALIZATION_GUARD_CODES = [
   "existing_market_structure_is_not_bot_owned",
   "lot_structure_contains_human_decisions",
 ];
+
+// LOT D — controlled RPC returns. The RPCs report what they actually did
+// (migrations 20260714100000 and 20260721160000): an unmatched candidate or a
+// sync that touched nothing means the analysis landed nowhere. The write then
+// fails BEFORE the ledger, so the queue row goes failed instead of done and
+// no spend is recorded for a lost analysis.
+const MaterializeLotsResultSchema = z.object({
+  run_id: z.string().min(1),
+  created: z.number().int().min(0),
+  updated: z.number().int().min(0),
+  preserved: z.number().int().min(0),
+  review_required: z.number().int().min(0),
+}).passthrough();
+
+const SyncLotAnalysisResultSchema = z.object({
+  matched: z.number().int().min(0),
+  unmatched: z.number().int().min(0),
+  locked: z.number().int().min(0),
+}).passthrough();
+
+export class AnalyzeLotSyncUnmatchedError extends Error {
+  readonly code = "ANALYZE_LOT_SYNC_UNMATCHED";
+
+  constructor(
+    public readonly matched: number,
+    public readonly unmatched: number,
+    public readonly locked: number,
+  ) {
+    super("ANALYZE_LOT_SYNC_UNMATCHED");
+    this.name = "AnalyzeLotSyncUnmatchedError";
+  }
+}
+
+/**
+ * LOT D — roster proof before materialization. Reliable roster sources, in
+ * the spirit of the edge (existing DB children merged into the candidates,
+ * filename/DB lot numbers): the lot children already in base and the
+ * analysis_lot_number carried by the assembled documents. When either exists,
+ * an analysis producing fewer lots must not materialize (the RPC would flip
+ * the missing lots to review_required). Without any reliable source, the
+ * materialization requires the LLM's explicit rosterComplete declaration.
+ * A refused roster falls back to the sync alone, like a guard error.
+ */
+function lotRosterVerdict(
+  assembly: AnalyzeDossierAssembly,
+  payload: AnalysisWritePayload,
+):
+  | { materialize: true }
+  | { materialize: false; event: string; data: Record<string, unknown> } {
+  const produced = payload.lots.length;
+  const documentLotNumbers = new Set(
+    assembly.dossier.documents.flatMap((document) => {
+      if (!document.lotNumber) return [];
+      return [
+        normalizeLotNumberValue(document.lotNumber) ??
+          document.lotNumber.trim().toLocaleLowerCase("fr"),
+      ];
+    }),
+  );
+  const expected = Math.max(assembly.existingLotCount, documentLotNumbers.size);
+  if (expected > 0) {
+    if (produced >= expected) return { materialize: true };
+    return {
+      materialize: false,
+      event: "analyze_lot_roster_incomplete",
+      data: {
+        expected,
+        produced,
+        existing_lots: assembly.existingLotCount,
+        document_lots: documentLotNumbers.size,
+      },
+    };
+  }
+  if (payload.rosterComplete) return { materialize: true };
+  return {
+    materialize: false,
+    event: "analyze_lot_roster_unproven",
+    data: { produced },
+  };
+}
 
 function errorMessageOf(error: unknown): string {
   return typeof error === "object" && error !== null && "message" in error
@@ -537,8 +686,17 @@ async function writeAnalysis(
     (assembly.recordType === "market" || assembly.lot !== null) &&
     payload.lots.length > 0
   ) {
+    const businessContext: BusinessFieldContext = {
+      documents: assembly.dossier.documents,
+      ...(logger
+        ? {
+          log: (event: string, data: Record<string, unknown>) =>
+            logger.info(event, { tender_id: payload.tenderId, ...data }),
+        }
+        : {}),
+    };
     const lotsRpcPayload = payload.lots.map((lot, order) =>
-      lotRpcCandidate(lot, order)
+      lotRpcCandidate(lot, order, businessContext)
     );
     const runEvidence = {
       queue_id: assembly.queue.queueId,
@@ -547,29 +705,54 @@ async function writeAnalysis(
       omitted_documents: assembly.coverage.omittedDocuments,
     };
     // Materialize the missing lot rows only for an eligible market mother —
-    // never for a direct lot (its rows already exist under the parent).
+    // never for a direct lot (its rows already exist under the parent) — and
+    // only when the produced roster is proven exhaustive (LOT D).
     if (assembly.lot === null && assembly.autoMaterializeLots) {
-      const materialized = await client.rpc("materialize_tender_lots", {
-        p_parent_tender_id: payload.tenderId,
-        p_analysis_state: analysisState,
-        p_extraction_source: "dce",
-        p_extractor_version: "analyze-dce-lots-v1",
-        p_input_hash: hashLotRpcPayload(lotsRpcPayload),
-        p_lots: lotsRpcPayload,
-        p_run_evidence: runEvidence,
-      });
-      if (materialized.error) {
-        if (!isLotMaterializationGuardError(materialized.error)) {
-          throwSupabaseError(
-            materialized.error,
-            "ANALYZE_LOT_MATERIALIZE_FAILED",
-          );
-        }
-        // Edge parity: the human structure now wins; keep the sync alone.
-        logger?.info("analyze_lot_materialization_skipped", {
+      const roster = lotRosterVerdict(assembly, payload);
+      if (!roster.materialize) {
+        // Unproven roster: never rewrite the lot structure, sync alone.
+        logger?.info(roster.event, {
           tender_id: payload.tenderId,
-          error: errorMessageOf(materialized.error),
+          ...roster.data,
         });
+      } else {
+        const materialized = await client.rpc("materialize_tender_lots", {
+          p_parent_tender_id: payload.tenderId,
+          p_analysis_state: analysisState,
+          p_extraction_source: "dce",
+          p_extractor_version: "analyze-dce-lots-v1",
+          p_input_hash: hashLotRpcPayload(lotsRpcPayload),
+          p_lots: lotsRpcPayload,
+          p_run_evidence: runEvidence,
+        });
+        if (materialized.error) {
+          if (!isLotMaterializationGuardError(materialized.error)) {
+            throwSupabaseError(
+              materialized.error,
+              "ANALYZE_LOT_MATERIALIZE_FAILED",
+            );
+          }
+          // Edge parity: the human structure now wins; keep the sync alone.
+          logger?.info("analyze_lot_materialization_skipped", {
+            tender_id: payload.tenderId,
+            error: errorMessageOf(materialized.error),
+          });
+        } else {
+          const materializedReport = MaterializeLotsResultSchema.safeParse(
+            materialized.data,
+          );
+          if (!materializedReport.success) {
+            throw new Error("ANALYZE_LOT_MATERIALIZE_INVALID_RESPONSE");
+          }
+          logger?.info("analyze_lot_materialized", {
+            tender_id: payload.tenderId,
+            run_id: materializedReport.data.run_id,
+            created: materializedReport.data.created,
+            updated: materializedReport.data.updated,
+            preserved: materializedReport.data.preserved,
+            review_required: materializedReport.data.review_required,
+          });
+        }
       }
     }
     const result = await client.rpc("sync_tender_lot_analysis", {
@@ -584,6 +767,17 @@ async function writeAnalysis(
       p_run_evidence: runEvidence,
     });
     checked(result, "ANALYZE_LOT_SYNC_FAILED");
+    const syncReport = SyncLotAnalysisResultSchema.safeParse(result.data);
+    if (!syncReport.success) {
+      throw new Error("ANALYZE_LOT_SYNC_INVALID_RESPONSE");
+    }
+    if (syncReport.data.matched === 0 || syncReport.data.unmatched > 0) {
+      throw new AnalyzeLotSyncUnmatchedError(
+        syncReport.data.matched,
+        syncReport.data.unmatched,
+        syncReport.data.locked,
+      );
+    }
   }
 
   const ledgerResult = await client.rpc("record_ai_spend", {

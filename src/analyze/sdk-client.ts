@@ -68,8 +68,9 @@ function buildSystemPrompt(repair: boolean): string {
     "Tu identifies les faits utiles aux règles rédhibitoires, mais seul le code décide du blocage.",
     "La synthèse mère reste courte. Chaque lot reçoit une synthèse riche couvrant périmètre, prestations, exigences, qualifications, montants et vigilances.",
     "Chaque affirmation importante cite un document extrait.",
-    "Pour chaque lot, tu remplis businessFields avec quatre champs métier : summaryDescription (description des prestations), contractDuration (durée du marché), workStartDate (date de démarrage au format AAAA-MM-JJ), estimatedValue (montant estimé en euros, nombre strictement positif).",
-    "Chaque champ métier présent exige une citation exacte, copiée mot pour mot du document source. Sans passage exact trouvé dans les documents, le champ vaut null : tu n'inventes jamais une valeur ni une citation.",
+    "Pour chaque lot, tu remplis businessFields avec quatre champs métier : summaryDescription (description des prestations), contractDuration (durée du marché), workStartDate (date de démarrage au format AAAA-MM-JJ, une vraie date calendaire), estimatedValue (montant estimé en euros, nombre strictement positif).",
+    "Chaque champ métier présent exige une citation exacte, copiée mot pour mot du document source, ET le documentId de ce document (l'id exact du manifeste). La citation doit apparaître telle quelle dans CE document ; pour estimatedValue, le nombre doit être lisible dans la citation. Sans passage exact trouvé, le champ vaut null : tu n'inventes jamais une valeur, une citation ni un documentId.",
+    "rosterComplete vaut true uniquement si ta liste d'unités couvre TOUS les lots du marché d'après les documents ; au moindre doute (liste de lots incomplète ou introuvable), rosterComplete vaut false.",
   ];
   if (repair) {
     lines.push(

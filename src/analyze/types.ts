@@ -34,24 +34,47 @@ export const AnalysisUnitSchema = z.discriminatedUnion("kind", [
 // the sync RPC: a null field means "not found in the documents" and the
 // corresponding column is simply never touched. Every present field MUST carry
 // a verbatim citation from an analyzed document (the RPC raises 23514 without
-// one), so a value can never be asserted without its proof.
+// one) AND the id of the source document (LOT D: the citation is re-grounded
+// against that document's text and its role/fileName become the RPC evidence),
+// so a value can never be asserted without its proof.
 const businessCitation = z.string().trim().min(1).max(1_000);
+const businessDocumentId = z.string().trim().min(1).max(200);
+// A shape-valid date is not enough (2026-99-99 matches the regex): the value
+// must round-trip through a real calendar date (UTC, no rollover).
+const calendarDate = z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/).refine(
+  (value) => {
+    const [year, month, day] = value.split("-").map(Number) as [
+      number,
+      number,
+      number,
+    ];
+    const parsed = new Date(Date.UTC(year, month - 1, day));
+    return parsed.getUTCFullYear() === year &&
+      parsed.getUTCMonth() === month - 1 &&
+      parsed.getUTCDate() === day;
+  },
+  { message: "Not a real calendar date" },
+);
 export const LotBusinessFieldsSchema = z.object({
   summaryDescription: z.object({
     value: z.string().trim().min(1).max(2_000),
     citation: businessCitation,
+    documentId: businessDocumentId,
   }).strict().nullable(),
   contractDuration: z.object({
     value: z.string().trim().min(1).max(500),
     citation: businessCitation,
+    documentId: businessDocumentId,
   }).strict().nullable(),
   workStartDate: z.object({
-    value: z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/),
+    value: calendarDate,
     citation: businessCitation,
+    documentId: businessDocumentId,
   }).strict().nullable(),
   estimatedValue: z.object({
     value: z.number().finite().positive(),
     citation: businessCitation,
+    documentId: businessDocumentId,
   }).strict().nullable(),
 }).strict();
 export type LotBusinessFields = z.infer<typeof LotBusinessFieldsSchema>;
@@ -111,6 +134,13 @@ export const AnalysisUnitDraftSchema = z.object({
 
 export const AgentAnalysisDraftSchema = z.object({
   marketSummary: z.string().trim().min(1).max(2_000),
+  // LOT D roster proof: the LLM must explicitly declare whether the produced
+  // units cover EVERY lot of the market according to the documents. Closest
+  // worker equivalent of the edge canonical-roster requirement
+  // (collectCanonicalLotDefinitions): without per-document extractions the
+  // worker cannot rebuild the roster itself, so an explicit declaration gates
+  // the materialization when no reliable roster source exists.
+  rosterComplete: z.boolean(),
   units: z.array(AnalysisUnitDraftSchema).min(1).max(100),
 }).strict().superRefine((value, context) => {
   const markets = value.units.filter((entry) => entry.unit.kind === "market");
@@ -186,6 +216,8 @@ export interface FinalizedAnalysis {
   score: number;
   reason: string;
   forcedZero: boolean;
+  /** LLM declaration that the produced units cover every lot (LOT D roster). */
+  rosterComplete: boolean;
   marketSummary: string;
   recommendedLot: { number: string; title: string } | null;
   watchpoints: string[];

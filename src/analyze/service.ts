@@ -12,6 +12,7 @@ import {
   finalizeAnalysisDraft,
   type DeadlineGateStatus,
 } from "./domain.js";
+import { degradeUngroundedBusinessFields } from "./grounding.js";
 import type {
   FinalAnalysisUnit,
   FinalizedAnalysis,
@@ -52,6 +53,9 @@ export interface AnalyzeLotContext {
 
 export interface AnalysisWritePayload {
   tenderId: string;
+  /** LLM roster declaration, gating the materialization when no reliable
+   * roster source exists in the assembly (LOT D). */
+  rosterComplete: boolean;
   tenderValues: Record<string, unknown>;
   lots: AnalysisLotValues[];
   ledger: {
@@ -111,7 +115,7 @@ function lotValues(unit: FinalAnalysisUnit): AnalysisLotValues | null {
 
 // Same lot-number normalization family as the edge (handler.ts
 // normalizeLotNumberValue): "Lot n°01a" → "1A".
-function normalizeLotNumberValue(value: string | null): string | null {
+export function normalizeLotNumberValue(value: string | null): string | null {
   if (value === null) return null;
   const match = value.trim().match(
     /^(?:lot\s*(?:n\s*[°ºo]?\s*)?)?0*([0-9]{1,3})([a-z]?)$/i,
@@ -219,6 +223,7 @@ export function buildAnalysisWritePayload(input: {
 
   return {
     tenderId: input.tenderId,
+    rosterComplete: input.result.rosterComplete,
     tenderValues,
     lots: targetLot
       ? [{
@@ -283,8 +288,22 @@ export async function runAnalyzeService(input: {
     },
   });
   const now = input.now ?? (() => new Date());
-  const finalized = finalizeAnalysisDraft({
+  // LOT D: degrade ungrounded business fields BEFORE finalization, so the
+  // stored analysis details and the RPC payloads never carry an unproven
+  // value (invented citation, unknown document, unsupported amount).
+  const groundedDraft = degradeUngroundedBusinessFields({
     draft: generated.draft,
+    documents: input.dossier.documents,
+    tenderId: input.dossier.tender.id,
+    ...(input.logger
+      ? {
+        log: (event: string, data: Record<string, unknown>) =>
+          input.logger?.info(event, data),
+      }
+      : {}),
+  });
+  const finalized = finalizeAnalysisDraft({
+    draft: groundedDraft,
     company: input.dossier.company,
     mandatoryQualifications: input.dossier.mandatoryQualifications,
   });
