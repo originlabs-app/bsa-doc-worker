@@ -16,6 +16,8 @@ function config(mode: ReaderMode): ReaderConfig {
     mode,
     batch: 2,
     model: "google/gemini-3.5-flash",
+    modelFallback: null,
+    auditSamplePercent: 0,
     supabaseUrl: "https://example.supabase.co",
     supabaseServiceRoleKey: "service-role",
     openRouterApiKey: "openrouter",

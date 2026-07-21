@@ -50,6 +50,15 @@ export interface ExtractionNote {
   magicHex?: string;
   costUsd?: number;
   attempts?: number;
+  fallbackUsed?: boolean;
+  zodAttempts?: number;
+}
+
+export interface ReaderAuditOutcome {
+  status: "compared" | "audit_failed";
+  agree: boolean;
+  fieldsDiff: string[];
+  costUsd: number;
 }
 
 export interface MaterializedZipChild {

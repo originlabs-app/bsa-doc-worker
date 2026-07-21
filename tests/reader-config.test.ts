@@ -8,7 +8,33 @@ describe("loadReaderConfig", () => {
       mode: "off",
       batch: 2,
       model: "google/gemini-3.5-flash",
+      modelFallback: "google/gemini-3.5-flash",
+      auditSamplePercent: 5,
     });
+  });
+
+  it("disables the cascade when the fallback model is explicitly empty", () => {
+    expect(
+      loadReaderConfig({ OPENROUTER_MODEL_EXTRACT_FALLBACK: "" }),
+    ).toMatchObject({ modelFallback: null });
+    expect(
+      loadReaderConfig({ OPENROUTER_MODEL_EXTRACT_FALLBACK: "vendor/backup" }),
+    ).toMatchObject({ modelFallback: "vendor/backup" });
+  });
+
+  it("bounds the audit sample percent and accepts 0 as off", () => {
+    expect(
+      loadReaderConfig({ READER_AUDIT_SAMPLE_PERCENT: "0" }),
+    ).toMatchObject({ auditSamplePercent: 0 });
+    expect(
+      loadReaderConfig({ READER_AUDIT_SAMPLE_PERCENT: "20" }),
+    ).toMatchObject({ auditSamplePercent: 20 });
+    expect(
+      loadReaderConfig({ READER_AUDIT_SAMPLE_PERCENT: "150" }),
+    ).toMatchObject({ auditSamplePercent: 5 });
+    expect(
+      loadReaderConfig({ READER_AUDIT_SAMPLE_PERCENT: "abc" }),
+    ).toMatchObject({ auditSamplePercent: 5 });
   });
 
   it("requires worker credentials outside off mode", () => {
