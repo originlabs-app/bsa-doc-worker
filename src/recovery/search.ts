@@ -60,10 +60,13 @@ export function createRecoveryPortalSearcher(
     portal: RecoveryPortal,
     target: RecoveryTarget,
   ): Promise<PortalSearchResult> => {
-    const results = await Promise.all(
-      buildRecoverySearchTerms(target).map((query) => backend(portal, query)),
-    );
-    const candidates = deduplicate(results.flatMap(({ candidates }) => candidates));
+    const results: PortalPublicCandidateResult[] = [];
+    for (const query of buildRecoverySearchTerms(target)) {
+      results.push(await backend(portal, query));
+    }
+    const candidates = deduplicate(
+      results.flatMap(({ candidates }) => candidates),
+    ).slice(0, 200);
     const blockedExternalHost = results
       .flatMap(({ blockedExternalHosts }) => blockedExternalHosts)
       .sort()[0];

@@ -33,6 +33,7 @@ export interface RecoverySweepDependencies {
     request: RecoveryRequest,
   ): Promise<AdapterDiscovery>;
   pipeline: RecoveryDocumentPipeline;
+  captchaUnits?(): number;
   logger?: WorkerLogger;
 }
 
@@ -159,6 +160,11 @@ export async function runRecoverySweep(
 
   const targets = await dependencies.store.listEligible(config.batchSize);
   report.nEligible = targets.length;
+  dependencies.logger?.info("recovery_selection_completed", {
+    mode: config.mode,
+    n_eligible: targets.length,
+    units: 0,
+  });
 
   for (const target of targets) {
     const reservation =
@@ -199,10 +205,27 @@ export async function runRecoverySweep(
       },
     );
     const evidence = safeEvidence(searchResults, reconciliation.evidence);
+    for (const searchResult of searchResults) {
+      const portalMatch = reconciliation.evidence.find(
+        ({ candidate }) => candidate.portal === searchResult.portal,
+      );
+      dependencies.logger?.info("recovery_identification_completed", {
+        tender_id: target.tenderId,
+        portal: searchResult.portal,
+        decision: portalMatch?.level ??
+          (searchResult.errorCode ? "error" : "low"),
+        candidates: searchResult.candidates.length,
+        units: 0,
+      });
+    }
 
     if (reconciliation.outcome !== "matched") {
-      let status: "ambiguous" | "blocked" | "not_found";
+      let status: "ambiguous" | "blocked" | "not_found" | "error";
       if (reconciliation.outcome === "ambiguous") status = "ambiguous";
+      else if (
+        searchResults.some(({ errorCode }) => errorCode) &&
+        searchResults.every(({ candidates }) => candidates.length === 0)
+      ) status = "error";
       else if (
         searchResults.some(({ blockedExternalHost }) => blockedExternalHost) ||
         originalPortalBlocked(target.buyerProfileLink)
@@ -215,7 +238,13 @@ export async function runRecoverySweep(
           reservation.attemptId,
           status,
           null,
-          status === "ambiguous" ? "medium" : status === "blocked" ? "blocked" : "low",
+          status === "ambiguous"
+            ? "medium"
+            : status === "blocked"
+              ? "blocked"
+              : status === "error"
+                ? "error"
+                : "low",
           evidence,
         );
       }
@@ -234,13 +263,20 @@ export async function runRecoverySweep(
         match.candidate.portal,
         requestFor(target, match),
       );
+      dependencies.logger?.info("recovery_manifest_discovered", {
+        tender_id: target.tenderId,
+        portal: match.candidate.portal,
+        decision: match.level,
+        attachments: discovery.safeManifest.attachments.length,
+        units: dependencies.captchaUnits?.() ?? 0,
+      });
       const prepared = await dependencies.pipeline.fetchAndUpload({
         target,
         match,
         discovery,
       });
       try {
-        await dependencies.store.persistFound({
+        const persisted = await dependencies.store.persistFound({
           attemptId: reservation.attemptId,
           tenderId: target.tenderId,
           portal: match.candidate.portal,
@@ -256,6 +292,18 @@ export async function runRecoverySweep(
             })),
           },
           documents: prepared.documents,
+        });
+        dependencies.logger?.info("recovery_sink_completed", {
+          tender_id: target.tenderId,
+          portal: match.candidate.portal,
+          decision: match.level,
+          bytes: prepared.documents.reduce(
+            (sum, document) => sum + document.bytes,
+            0,
+          ),
+          inserted_documents: persisted.insertedDocuments,
+          queue_status: persisted.queueStatus,
+          units: dependencies.captchaUnits?.() ?? 0,
         });
       } catch (error) {
         await prepared.rollback().catch(() => undefined);
@@ -277,6 +325,13 @@ export async function runRecoverySweep(
         status === "too_large" ? match.level : status,
         evidence,
       );
+      dependencies.logger?.info("recovery_attempt_completed", {
+        tender_id: target.tenderId,
+        portal: match.candidate.portal,
+        decision: status === "too_large" ? match.level : status,
+        status,
+        units: dependencies.captchaUnits?.() ?? 0,
+      });
     }
   }
 

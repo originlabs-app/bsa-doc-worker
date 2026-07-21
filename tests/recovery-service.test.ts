@@ -174,4 +174,24 @@ describe("runRecoverySweep", () => {
     );
     expect(report.nTooLarge).toBe(1);
   });
+
+  it("records a portal outage as error instead of a false not_found", async () => {
+    const fixture = dependencies({ candidates: [] });
+    vi.mocked(fixture.deps.searchPortal).mockImplementation(async (portal) => ({
+      portal,
+      candidates: [],
+      errorCode: "PORTAL_SEARCH_FAILED",
+    }));
+
+    const report = await runRecoverySweep(
+      { mode: "apply", batchSize: 25 },
+      fixture.deps,
+    );
+
+    expect(fixture.store.finalize).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "error", decision: "error" }),
+    );
+    expect(report.nError).toBe(1);
+    expect(report.nNotFound).toBe(0);
+  });
 });

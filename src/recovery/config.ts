@@ -5,7 +5,6 @@ import { RecoveryModeSchema, type RecoveryMode } from "../contracts.js";
 const BatchSizeSchema = z.coerce.number().int().min(1).max(100);
 const StrongThresholdSchema = z.coerce.number().min(0.5).max(0.7);
 const TitleOnlyThresholdSchema = z.coerce.number().min(0.7).max(1);
-const CronGuardSchema = z.enum(["off", "paris_0715"]);
 
 export const RECOVERY_MAX_BYTES = 256 * 1024 * 1024;
 
@@ -14,7 +13,6 @@ export interface RecoveryConfig {
   batchSize: number;
   strongTitleJaccard: number;
   titleOnlyJaccard: number;
-  cronGuard: "off" | "paris_0715";
   maxBytes: number;
 }
 
@@ -30,7 +28,6 @@ export function loadRecoveryConfig(
     titleOnlyJaccard: TitleOnlyThresholdSchema.parse(
       env.RECOVERY_TITLE_ONLY_JACCARD ?? "0.70",
     ),
-    cronGuard: CronGuardSchema.parse(env.RECOVERY_CRON_GUARD ?? "off"),
     maxBytes: RECOVERY_MAX_BYTES,
   };
 }
@@ -43,5 +40,5 @@ export function isParisCronWindow(now: Date): boolean {
     hour12: false,
   }).formatToParts(now);
   const values = Object.fromEntries(parts.map(({ type, value }) => [type, value]));
-  return values.hour === "07" && values.minute === "15";
+  return values.hour === "07";
 }
