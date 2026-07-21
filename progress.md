@@ -342,3 +342,7 @@
 - Worktree dédié `../BSA_DCE_RECOVERY_WORKER-reader-hardening`, branche
   `feat/reader-hardening` depuis main `8ffab18`. Pas de push (merge Pierre).
 - Statut : READER-HARDENING GELÉ (fixes aux commits `038451d` + `46a32e9`).
+
+## 2026-07-21 — Recovery apply continuous — tranche SQL
+
+- TRANCHE SQL GELÉE au 5ebe62b
