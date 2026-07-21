@@ -1719,3 +1719,259 @@ describe("Supabase ANALYZE hardening (LOT D)", () => {
     });
   });
 });
+
+describe("Supabase ANALYZE market zero-information guard (LOT E)", () => {
+  function marketAssembly(overrides: Record<string, unknown> = {}) {
+    return {
+      queue: candidate,
+      companyId: "company-1",
+      recordType: "market",
+      lot: null,
+      autoMaterializeLots: true,
+      existingLotCount: 0,
+      existingScore: 72,
+      deadlineDate: null,
+      dossier: {
+        tender: {
+          id: "tender-1",
+          title: "Marché",
+          buyerName: null,
+          description: null,
+          location: null,
+          estimatedAmount: null,
+          procedureType: null,
+        },
+        company: {},
+        mandatoryQualifications: [],
+        documents: [],
+      },
+      coverage: {
+        complete: true,
+        documentsCount: 1,
+        omittedDocuments: 0,
+        totalCharacters: 10,
+      },
+      ...overrides,
+    };
+  }
+
+  function lotEntry(
+    number: string,
+    relevanceScore: number | null,
+  ): AnalysisWritePayload["lots"][number] {
+    return {
+      sourceLotKey: null,
+      number,
+      title: `Lot ${number}`,
+      relevanceScore,
+      relevanceReason: relevanceScore === null ? "Lot non retrouvé" : "Fit",
+      verdict: relevanceScore === null ? null : "relevant",
+      forcedZero: false,
+      summary: null,
+      businessFields: null,
+    };
+  }
+
+  function payloadWith(
+    lots: AnalysisWritePayload["lots"],
+  ): AnalysisWritePayload {
+    return {
+      tenderId: "tender-1",
+      rosterComplete: true,
+      tenderValues: { relevance_score: 0 },
+      lots,
+      ledger: {
+        tenderId: "tender-1",
+        step: "dce_scoring",
+        model: "model",
+        costUsd: 0.01,
+        metadata: {},
+      },
+    };
+  }
+
+  function rpcNames(fixture: ReturnType<typeof fixtureClient>): string[] {
+    return fixture.rpc.mock.calls.map(([name]) => name as string);
+  }
+
+  it("rejects a market analysis whose lots all lack a score, before any write", async () => {
+    const logger = { info: vi.fn() };
+    const fixture = fixtureClient({ tender, company });
+    const store = createSupabaseAnalyzeStore(fixture.client, { logger });
+
+    await expect(
+      store.createResultSink(marketAssembly())
+        .write(payloadWith([lotEntry("1", null), lotEntry("2", null)])),
+    ).rejects.toThrow("ANALYZE_MARKET_ZERO_LOT_SCORES");
+
+    // No tender write at all: the mother keeps its current values.
+    expect(fixture.updates).toEqual([]);
+    expect(rpcNames(fixture)).not.toContain("materialize_tender_lots");
+    expect(rpcNames(fixture)).not.toContain("sync_tender_lot_analysis");
+    expect(rpcNames(fixture)).not.toContain("record_ai_spend");
+    expect(logger.info).toHaveBeenCalledWith(
+      "analyze_market_zero_lot_scores",
+      expect.objectContaining({
+        tender_id: "tender-1",
+        lots_total: 2,
+        lots_scored: 0,
+      }),
+    );
+  });
+
+  it("keeps the full flow when at least one lot carries a score", async () => {
+    const fixture = fixtureClient({ tender, company });
+    const store = createSupabaseAnalyzeStore(fixture.client);
+
+    await store.createResultSink(marketAssembly())
+      .write(payloadWith([lotEntry("1", null), lotEntry("2", 80)]));
+
+    expect(fixture.updates.some((entry) => entry.table === "tender")).toBe(true);
+    expect(rpcNames(fixture)).toContain("sync_tender_lot_analysis");
+    expect(rpcNames(fixture)).toContain("record_ai_spend");
+  });
+
+  it("keeps the normal flow for a market without payload lots", async () => {
+    const fixture = fixtureClient({ tender, company });
+    const store = createSupabaseAnalyzeStore(fixture.client);
+
+    await store.createResultSink(marketAssembly()).write(payloadWith([]));
+
+    expect(fixture.updates.some((entry) => entry.table === "tender")).toBe(true);
+    expect(rpcNames(fixture)).toContain("record_ai_spend");
+  });
+
+  it("leaves the direct-lot null-score semantics untouched", async () => {
+    const fixture = fixtureClient({ tender: lotTender, company });
+    const store = createSupabaseAnalyzeStore(fixture.client);
+
+    await store.createResultSink(marketAssembly({
+      queue: { queueId: "queue-1", tenderId: "lot-1", attempts: 1 },
+      recordType: "lot",
+      lot: {
+        parentTenderId: "parent-1",
+        number: "1",
+        title: "Gros œuvre",
+        sourceLotKey: "boamp:lot-1",
+      },
+      autoMaterializeLots: false,
+    })).write({
+      ...payloadWith([{
+        ...lotEntry("1", null),
+        sourceLotKey: "boamp:lot-1",
+      }]),
+      tenderId: "lot-1",
+      tenderValues: { need_description: "Lot direct" },
+    });
+
+    expect(rpcNames(fixture)).toContain("sync_tender_lot_analysis");
+    expect(rpcNames(fixture)).toContain("record_ai_spend");
+  });
+
+  it("marks the queue row failed (attempts+1) when the guard fires end-to-end", async () => {
+    const fixture = fixtureClient({
+      tender,
+      company,
+      queue: [{
+        id: "queue-1",
+        tender_id: "tender-1",
+        attempts: 1,
+        tender: { record_type: "market" },
+      }],
+      documents: [document],
+    });
+    const store = createSupabaseAnalyzeStore(fixture.client, {
+      recordTypes: ["market"],
+    });
+    // Reproduce the prod defect at the write boundary: an analysis whose lot
+    // entries all land without a score (48-lot mother beyond output capacity).
+    const applyStore = {
+      ...store,
+      createResultSink: (assembly: Parameters<typeof store.createResultSink>[0]) => {
+        const sink = store.createResultSink(assembly);
+        return {
+          write: (payload: AnalysisWritePayload) =>
+            sink.write({
+              ...payload,
+              lots: payload.lots.map((lot) => ({
+                ...lot,
+                relevanceScore: null,
+              })),
+            }),
+        };
+      },
+    };
+
+    const report = await runAnalyzeOneShot({
+      mode: "apply",
+      model: "openai/gpt-5.6-terra",
+      maxSteps: 8,
+      maxOutputTokens: 8_192,
+      deadlineMinDays: 15,
+      recordTypes: ["market"],
+      openRouterApiKey: "test",
+    }, {
+      readStore: store,
+      applyStore,
+      client: {
+        generate: vi.fn().mockResolvedValue({
+          output: {
+            rosterComplete: true,
+            marketSummary: "Marché adapté.",
+            units: [{
+              unit: { kind: "lot", number: "1", title: "Rénovation" },
+              proposedVerdict: "favorable",
+              businessFields: null,
+              rationale: "Le besoin correspond au métier.",
+              criteria: {
+                metier: 30,
+                geo: 20,
+                montant: 20,
+                procedure: 15,
+                certifications: 0,
+              },
+              unknownCriteria: ["certifications"],
+              summary: {
+                scope: "Rénovation du bâtiment.",
+                services: ["Travaux"],
+                requirements: [],
+                qualifications: [],
+                amounts: [],
+                watchpoints: [],
+              },
+              requiredQualifications: [],
+              socialInsertion: null,
+              citations: [{ documentId: "doc-1", excerpt: "Texte" }],
+            }],
+          },
+          stepsUsed: 2,
+          costUsd: 0.02,
+          usage: { inputTokens: 800, outputTokens: 300, totalTokens: 1_100 },
+        }),
+      },
+      recallLearning: vi.fn().mockResolvedValue({
+        lessons: [],
+        rules: [],
+        context: "",
+      }),
+    }, { now: () => new Date("2026-07-21T08:00:00.000Z") });
+
+    expect(report).toMatchObject({
+      mode: "apply",
+      status: "failed",
+      issue: "ANALYZE_MARKET_ZERO_LOT_SCORES",
+    });
+    expect(rpcNames(fixture)).not.toContain("record_ai_spend");
+    const tenderUpdates = fixture.updates
+      .filter((entry) => entry.table === "tender");
+    expect(tenderUpdates).toEqual([]);
+    const queueUpdates = fixture.updates
+      .filter((entry) => entry.table === "dce_analysis_queue")
+      .map((entry) => entry.values as Record<string, unknown>);
+    expect(queueUpdates).toEqual([expect.objectContaining({
+      status: "failed",
+      attempts: 2,
+      last_error: "ANALYZE_MARKET_ZERO_LOT_SCORES",
+    })]);
+  });
+});
