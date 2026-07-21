@@ -465,3 +465,35 @@ bloquants avant activation ANALYZE_RECORD_TYPES=market|lot :
 Interdits respectés : peekCandidates intact, config ANALYZE_RECORD_TYPES intact.
 Gates : typecheck OK, test:ci 351/351 (baseline 301, +50), lint OK, build OK.
 Pas de push/merge (orchestrateur).
+
+## 2026-07-21 — LOT H : analyse en tranches des mères très alloties (feat/analyze-chunked-units)
+Bénéfice : une mère à 48 lots n'échoue plus (0 unit mappé / sortie tronquée
+payée pour rien) — chaque appel LLM a une sortie attendue qui tient dans
+maxOutputTokens, et une tranche invalide échoue typée sans écriture.
+Architecture :
+1. src/analyze/chunking.ts (nouveau) : runChunkedDceAnalyst = 1 appel cadrage
+   (MarketFramingSchema : résumé, watchpoints globaux, roster complet, validé
+   contre les sources fiables LOT D — analysis_lot_number des docs +
+   existingLotCount DB) puis N appels tranche (buildChunkUnitsSchema : units
+   exactement = lots de la tranche, grounding citations par tranche).
+   1 retry repair par appel ; échec => AnalyzeChunkFailedError
+   (code ANALYZE_CHUNK_FAILED, message ANALYZE_CHUNK_FAILED:<tranche>),
+   coût déjà payé porté par l'erreur. Assemblage = concat en ordre roster +
+   reparse AgentAnalysisDraftSchema + assertDraftGrounded, rosterComplete=true.
+2. Dispatch service.ts : expectedRosterSize = max(existingLotCount passé par
+   wiring, lots attestés par documents) ; tranches seulement si pas de lot
+   cible et roster > ANALYZE_UNITS_PER_CALL (config, défaut 8, borné 1-20).
+   Standalone/lot direct/petit marché : single-call inchangé.
+3. sdk-client.ts : prompts + Output.object par mission (framing/chunk/legacy).
+4. Coûts/usage/steps additionnés dans result.costUsd ; log analyze_chunk
+   {index, lots, cost_usd, status, attempts} (index 0 = cadrage).
+Cache : tranches réussies non rejouées dans le run ; au retry queue suivant
+tout est repayé (pas de cache durable — choix simple assumé, documenté).
+Interdits respectés : peekCandidates intact, périmètre intact, aucun réseau
+en tests (mocks generate/generateText).
+Gates : typecheck OK, test:ci 411/411 (baseline 369 au fork, +21 LOT H,
+rebase sur origin/main 54252f2), lint OK, build OK. Commit 13ae5a7 [skip ci].
+Limites (à prouver au retour des crédits) : qualité réelle du cadrage (roster
+exhaustif sur vrais DCE), coût total multi-appels vs un appel, prompts de
+tranche non calibrés sur vrai LLM ; watchpoints globaux du cadrage servent de
+contexte aux tranches mais ne sont pas persistés en propre.
