@@ -115,6 +115,22 @@ const tender = {
   status: "opportunity",
   record_type: "market",
   parent_tender_id: null,
+  lot_number: null,
+  lot_title: null,
+  source_lot_key: null,
+  lot_analysis_state: null,
+};
+
+const lotTender = {
+  ...tender,
+  id: "lot-1",
+  title: "Lot 1 — Gros œuvre",
+  record_type: "lot",
+  parent_tender_id: "parent-1",
+  lot_number: "1",
+  lot_title: "Gros œuvre",
+  source_lot_key: "boamp:lot-1",
+  lot_analysis_state: "metadata_only",
 };
 
 const company = {
@@ -301,6 +317,7 @@ describe("Supabase ANALYZE apply contract", () => {
       tenderId: "tender-1",
       tenderValues: { relevance_score: 100, relevance_reason: "Excellent fit" },
       lots: [{
+        sourceLotKey: null,
         number: "1",
         title: "Rénovation",
         relevanceScore: 100,
@@ -330,6 +347,7 @@ describe("Supabase ANALYZE apply contract", () => {
       queue: candidate,
       companyId: "company-1",
       recordType: "market",
+      lot: null,
       existingScore: 72,
       deadlineDate: null,
       dossier: {
@@ -394,18 +412,22 @@ describe("Supabase ANALYZE apply contract", () => {
     ]));
   });
 
-  it("does not call the market-parent lot sync for a direct lot analysis", async () => {
-    const fixture = fixtureClient({ tender, company });
-    const store = createSupabaseAnalyzeStore(fixture.client);
-    await store.createResultSink({
-      queue: candidate,
+  function directLotAssembly(sourceLotKey: string | null) {
+    return {
+      queue: { queueId: "queue-1", tenderId: "lot-1", attempts: 1 },
       companyId: "company-1",
       recordType: "lot",
+      lot: {
+        parentTenderId: "parent-1",
+        number: "1",
+        title: "Gros œuvre",
+        sourceLotKey,
+      },
       existingScore: 72,
       deadlineDate: null,
       dossier: {
         tender: {
-          id: "tender-1",
+          id: "lot-1",
           title: "Lot 1",
           buyerName: null,
           description: null,
@@ -423,12 +445,17 @@ describe("Supabase ANALYZE apply contract", () => {
         omittedDocuments: 0,
         totalCharacters: 10,
       },
-    }).write({
-      tenderId: "tender-1",
-      tenderValues: { relevance_score: 80 },
+    };
+  }
+
+  function directLotPayload(sourceLotKey: string | null): AnalysisWritePayload {
+    return {
+      tenderId: "lot-1",
+      tenderValues: { need_description: "Lot direct" },
       lots: [{
+        sourceLotKey,
         number: "1",
-        title: "Lot direct",
+        title: "Gros œuvre",
         relevanceScore: 80,
         relevanceReason: "Fit",
         verdict: "recommended",
@@ -443,22 +470,122 @@ describe("Supabase ANALYZE apply contract", () => {
         },
       }],
       ledger: {
-        tenderId: "tender-1",
+        tenderId: "lot-1",
         step: "dce_scoring",
         model: "model",
         costUsd: 0.01,
         metadata: {},
       },
-    });
+    };
+  }
 
-    expect(fixture.rpc).not.toHaveBeenCalledWith(
-      "sync_tender_lot_analysis",
-      expect.anything(),
-    );
+  it("syncs a direct lot through its market parent with the DB source key", async () => {
+    const fixture = fixtureClient({ tender: lotTender, company });
+    const store = createSupabaseAnalyzeStore(fixture.client);
+    await store.createResultSink(directLotAssembly("boamp:lot-1"))
+      .write(directLotPayload("boamp:lot-1"));
+
+    expect(fixture.rpc).toHaveBeenCalledWith("sync_tender_lot_analysis", {
+      p_parent_tender_id: "parent-1",
+      p_analysis_state: "documentary_complete",
+      p_lots: [expect.objectContaining({
+        source_lot_key: "boamp:lot-1",
+        lot_number: "1",
+        lot_title: "Gros œuvre",
+        relevance_score: 80,
+        lot_fit_status: "recommended",
+      })],
+      p_run_evidence: expect.objectContaining({ queue_id: "queue-1" }),
+    });
     expect(fixture.rpc).toHaveBeenCalledWith(
       "record_ai_spend",
       expect.anything(),
     );
+    const tenderUpdate = fixture.updates.find((entry) => entry.table === "tender");
+    expect(tenderUpdate?.values).toEqual({ need_description: "Lot direct" });
+    expect(tenderUpdate?.values).not.toHaveProperty("analysis_state");
+    expect(tenderUpdate?.values).not.toHaveProperty("relevance_score");
+  });
+
+  it("falls back to the number-based lot key when the DB key is absent", async () => {
+    const fixture = fixtureClient({
+      tender: { ...lotTender, source_lot_key: null },
+      company,
+    });
+    const store = createSupabaseAnalyzeStore(fixture.client);
+    await store.createResultSink(directLotAssembly(null))
+      .write(directLotPayload(null));
+
+    expect(fixture.rpc).toHaveBeenCalledWith(
+      "sync_tender_lot_analysis",
+      expect.objectContaining({
+        p_parent_tender_id: "parent-1",
+        p_lots: [expect.objectContaining({ source_lot_key: "number:1" })],
+      }),
+    );
+  });
+});
+
+describe("Supabase ANALYZE direct lot assembly", () => {
+  it("assembles a direct lot with its parent context and target lot", async () => {
+    const fixture = fixtureClient({
+      tender: lotTender,
+      company,
+      documents: [{ ...document, tender_id: "lot-1" }],
+    });
+    const store = createSupabaseAnalyzeStore(fixture.client);
+
+    await expect(store.assembleCandidate({
+      queueId: "queue-1",
+      tenderId: "lot-1",
+      attempts: 0,
+    })).resolves.toMatchObject({
+      status: "ready",
+      assembly: {
+        recordType: "lot",
+        lot: {
+          parentTenderId: "parent-1",
+          number: "1",
+          title: "Gros œuvre",
+          sourceLotKey: "boamp:lot-1",
+        },
+        dossier: {
+          targetLot: { number: "1", title: "Gros œuvre" },
+        },
+      },
+    });
+  });
+
+  it("skips a human-validated lot without reading its documents", async () => {
+    const fixture = fixtureClient({
+      tender: { ...lotTender, lot_analysis_state: "human_validated" },
+      company,
+      documents: [document],
+    });
+    const store = createSupabaseAnalyzeStore(fixture.client);
+
+    await expect(store.assembleCandidate({
+      queueId: "queue-1",
+      tenderId: "lot-1",
+      attempts: 0,
+    })).resolves.toEqual({ status: "skipped", reason: "lot_human_validated" });
+    expect(fixture.download).not.toHaveBeenCalled();
+  });
+
+  it("skips an orphan lot without a market parent", async () => {
+    const fixture = fixtureClient({
+      tender: { ...lotTender, parent_tender_id: null },
+      company,
+      documents: [document],
+    });
+    const store = createSupabaseAnalyzeStore(fixture.client);
+
+    await expect(store.assembleCandidate({
+      queueId: "queue-1",
+      tenderId: "lot-1",
+      attempts: 0,
+    })).resolves.toEqual({ status: "skipped", reason: "lot_orphan" });
+    expect(fixture.download).not.toHaveBeenCalled();
   });
 });
 

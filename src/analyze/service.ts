@@ -24,13 +24,25 @@ export class AnalyzeApplySinkRequiredError extends Error {
 }
 
 export interface AnalysisLotValues {
-  number: string;
-  title: string;
-  relevanceScore: number;
+  sourceLotKey: string | null;
+  number: string | null;
+  title: string | null;
+  relevanceScore: number | null;
   relevanceReason: string;
-  verdict: FinalAnalysisUnit["verdict"];
+  verdict: FinalAnalysisUnit["verdict"] | null;
   forcedZero: boolean;
-  summary: FinalAnalysisUnit["summary"];
+  summary: FinalAnalysisUnit["summary"] | null;
+}
+
+/**
+ * Direct-lot analysis context: the tender being analyzed IS a lot record and
+ * scores/states must be written on it through its market parent (lock-safe RPC).
+ */
+export interface AnalyzeLotContext {
+  parentTenderId: string;
+  number: string | null;
+  title: string | null;
+  sourceLotKey: string | null;
 }
 
 export interface AnalysisWritePayload {
@@ -80,6 +92,7 @@ function unique(values: string[]): string[] {
 function lotValues(unit: FinalAnalysisUnit): AnalysisLotValues | null {
   if (unit.unit.kind !== "lot") return null;
   return {
+    sourceLotKey: null,
     number: unit.unit.number,
     title: unit.unit.title,
     relevanceScore: unit.score,
@@ -90,11 +103,70 @@ function lotValues(unit: FinalAnalysisUnit): AnalysisLotValues | null {
   };
 }
 
+// Same lot-number normalization family as the edge (handler.ts
+// normalizeLotNumberValue): "Lot n°01a" → "1A".
+function normalizeLotNumberValue(value: string | null): string | null {
+  if (value === null) return null;
+  const match = value.trim().match(
+    /^(?:lot\s*(?:n\s*[°ºo]?\s*)?)?0*([0-9]{1,3})([a-z]?)$/i,
+  );
+  if (!match) return null;
+  const parsed = Number(match[1]);
+  return Number.isInteger(parsed) && parsed > 0
+    ? `${parsed}${(match[2] ?? "").toUpperCase()}`
+    : null;
+}
+
+function normalizeForLotMatching(value: string | null): string {
+  return (value ?? "")
+    .toLocaleLowerCase("fr")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\blot\b/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+const NO_MATCHING_UNIT_REASON =
+  "Lot non retrouvé avec certitude dans les documents analysés";
+
+// Edge parity (findDocumentaryLotForTender/findScoringVerdictForLot): match by
+// normalized lot number first, then by normalized title equality/containment.
+function findUnitForTargetLot(
+  units: FinalAnalysisUnit[],
+  lot: AnalyzeLotContext,
+): FinalAnalysisUnit | null {
+  const lotUnits = units.filter((unit) => unit.unit.kind === "lot");
+  const targetNumber = normalizeLotNumberValue(lot.number);
+  if (targetNumber) {
+    const byNumber = lotUnits.find((unit) =>
+      unit.unit.kind === "lot" &&
+      normalizeLotNumberValue(unit.unit.number) === targetNumber
+    );
+    if (byNumber) return byNumber;
+  }
+  const targetTitle = normalizeForLotMatching(lot.title);
+  if (!targetTitle) return null;
+  return lotUnits.find((unit) => {
+    if (unit.unit.kind !== "lot") return false;
+    const candidateTitle = normalizeForLotMatching(unit.unit.title);
+    return candidateTitle === targetTitle ||
+      candidateTitle.includes(targetTitle) ||
+      targetTitle.includes(candidateTitle);
+  }) ?? null;
+}
+
 export function buildAnalysisWritePayload(input: {
   tenderId: string;
   result: AnalyzeResult;
+  lot?: AnalyzeLotContext | null;
 }): AnalysisWritePayload {
-  const recommended = input.result.units.find((unit) =>
+  const targetLot = input.lot ?? null;
+  const matchedUnit = targetLot
+    ? findUnitForTargetLot(input.result.units, targetLot)
+    : null;
+  const recommended = matchedUnit ?? input.result.units.find((unit) =>
     unit.verdict === "recommended"
   ) ?? input.result.units[0];
   const summary = recommended?.summary;
@@ -105,10 +177,28 @@ export function buildAnalysisWritePayload(input: {
     ...input.result.watchpoints,
     ...input.result.units.flatMap((unit) => unit.summary.watchpoints),
   ]);
-
-  return {
-    tenderId: input.tenderId,
-    tenderValues: {
+  const dceAnalysisDetails = {
+    market_summary: input.result.marketSummary,
+    units: input.result.units,
+    recommended_lot: input.result.recommendedLot,
+    learning: input.result.learning,
+    execution: input.result.execution,
+    deadline_gate: input.result.deadlineGate,
+  };
+  // Direct-lot analysis: score, states and fit locks belong to the lock-safe
+  // sync_tender_lot_analysis RPC (edge parity). The tender row itself only
+  // receives neutral fields.
+  const tenderValues: Record<string, unknown> = targetLot
+    ? {
+      need_description: needDescription,
+      watchpoints,
+      enriched_at: input.result.analyzedAt,
+      dce_analyzed_at: input.result.analyzedAt,
+      dce_analysis_details: dceAnalysisDetails,
+      ai_analysis_cost_usd: input.result.costUsd,
+      ai_analysis_model: input.result.model,
+    }
+    : {
       relevance_score: input.result.score,
       relevance_reason: input.result.reason,
       need_description: needDescription,
@@ -116,21 +206,31 @@ export function buildAnalysisWritePayload(input: {
       enriched_at: input.result.analyzedAt,
       scored_at: input.result.analyzedAt,
       dce_analyzed_at: input.result.analyzedAt,
-      dce_analysis_details: {
-        market_summary: input.result.marketSummary,
-        units: input.result.units,
-        recommended_lot: input.result.recommendedLot,
-        learning: input.result.learning,
-        execution: input.result.execution,
-        deadline_gate: input.result.deadlineGate,
-      },
+      dce_analysis_details: dceAnalysisDetails,
       ai_analysis_cost_usd: input.result.costUsd,
       ai_analysis_model: input.result.model,
-    },
-    lots: input.result.units.flatMap((unit) => {
-      const lot = lotValues(unit);
-      return lot ? [lot] : [];
-    }),
+    };
+
+  return {
+    tenderId: input.tenderId,
+    tenderValues,
+    lots: targetLot
+      ? [{
+        sourceLotKey: targetLot.sourceLotKey,
+        number: targetLot.number,
+        title: targetLot.title,
+        // No confident unit match → null score: the RPC then sets the lot to
+        // review_required instead of writing a wrong score.
+        relevanceScore: matchedUnit?.score ?? null,
+        relevanceReason: matchedUnit?.rationale ?? NO_MATCHING_UNIT_REASON,
+        verdict: matchedUnit?.verdict ?? null,
+        forcedZero: matchedUnit?.forcedZero ?? false,
+        summary: matchedUnit?.summary ?? null,
+      }]
+      : input.result.units.flatMap((unit) => {
+        const lot = lotValues(unit);
+        return lot ? [lot] : [];
+      }),
     ledger: {
       tenderId: input.tenderId,
       step: "dce_scoring",
@@ -152,6 +252,7 @@ export async function runAnalyzeService(input: {
   config: AnalyzeConfig;
   dossier: AnalyzeDossierInput;
   deadlineDate?: string | null;
+  lot?: AnalyzeLotContext | null;
   client: AgentGenerationClient;
   recallLearning: () => Promise<AnalyzeLearningSnapshot>;
   sink?: AnalysisResultSink;
@@ -223,6 +324,7 @@ export async function runAnalyzeService(input: {
   await input.sink!.write(buildAnalysisWritePayload({
     tenderId: input.dossier.tender.id,
     result,
+    lot: input.lot ?? null,
   }));
   const ruleIds = learning.rules.map((rule) => rule.id);
   if (ruleIds.length > 0 && input.recordLearningUsage) {

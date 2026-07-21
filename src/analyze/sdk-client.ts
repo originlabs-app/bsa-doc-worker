@@ -85,9 +85,17 @@ function buildUserPrompt(input: AgentGenerationRequest): string {
     lotNumber: document.lotNumber,
     characters: document.text.length,
   }));
+  const targetLot = input.dossier.targetLot ?? null;
   return [
     "MARCHÉ À ANALYSER:",
     JSON.stringify(input.dossier.tender),
+    ...(targetLot
+      ? [
+        "LOT CIBLE:",
+        JSON.stringify(targetLot),
+        "Analyse ce lot précis du marché : rends une unité de lot correspondant à ce lot cible.",
+      ]
+      : []),
     "PROFIL ENTREPRISE:",
     JSON.stringify(input.dossier.company),
     "DOCUMENTS EXTRAITS DISPONIBLES:",

@@ -28,6 +28,8 @@ export interface AnalyzeDossierInput {
   company: CompanyProfile;
   mandatoryQualifications: MandatoryQualification[];
   documents: AnalyzeDocumentInput[];
+  /** Present only for a direct lot analysis: the precise lot to analyze. */
+  targetLot?: { number: string | null; title: string | null } | null;
 }
 
 export type LessonKind = "go" | "pending_go" | "no_go" | "rejected";

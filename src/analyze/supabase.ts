@@ -69,6 +69,10 @@ const TenderRowSchema = z.object({
   status: z.string(),
   record_type: z.string().nullable(),
   parent_tender_id: z.string().nullable(),
+  lot_number: z.string().nullable(),
+  lot_title: z.string().nullable(),
+  source_lot_key: z.string().nullable(),
+  lot_analysis_state: z.string().nullable(),
 }).passthrough();
 
 const NullableStringArray = z.array(z.string()).nullable();
@@ -197,7 +201,7 @@ async function assembleCandidate(
   const rawTender = await singleRow(
     client,
     "tender",
-    "id,company_id,title,buyer_name,summary_description,contract_subject,project_location,city,department_code,estimated_value,procedure_type,deadline_date,submission_date,relevance_score,deleted_at,status,record_type,parent_tender_id",
+    "id,company_id,title,buyer_name,summary_description,contract_subject,project_location,city,department_code,estimated_value,procedure_type,deadline_date,submission_date,relevance_score,deleted_at,status,record_type,parent_tender_id,lot_number,lot_title,source_lot_key,lot_analysis_state",
     candidate.tenderId,
   );
   if (!rawTender) return { status: "skipped", reason: "tender_missing" };
@@ -208,6 +212,22 @@ async function assembleCandidate(
   if (tender.status === "rejected" || tender.status === "no_go") {
     return { status: "skipped", reason: `tender_status_${tender.status}` };
   }
+  const isDirectLot = tender.record_type === "lot";
+  if (isDirectLot && tender.lot_analysis_state === "human_validated") {
+    // Edge parity (handler.ts): a human-validated lot is never re-analyzed.
+    return { status: "skipped", reason: "lot_human_validated" };
+  }
+  if (isDirectLot && tender.parent_tender_id === null) {
+    return { status: "skipped", reason: "lot_orphan" };
+  }
+  const lotContext = isDirectLot && tender.parent_tender_id !== null
+    ? {
+      parentTenderId: tender.parent_tender_id,
+      number: nonBlank(tender.lot_number),
+      title: nonBlank(tender.lot_title),
+      sourceLotKey: nonBlank(tender.source_lot_key),
+    }
+    : null;
 
   const [rawCompany, rawQualifications, rawDocuments] = await Promise.all([
     singleRow(
@@ -281,6 +301,7 @@ async function assembleCandidate(
       queue: candidate,
       companyId: tender.company_id,
       recordType: tender.record_type,
+      lot: lotContext,
       existingScore: finiteNumber(tender.relevance_score),
       // Same coalesce order as the edge toScoringTender (scorer.ts:166-168).
       deadlineDate: nonBlank(tender.deadline_date) ??
@@ -324,6 +345,9 @@ async function assembleCandidate(
           aliases: qualification.aliases,
         })),
         documents: assembledDocuments,
+        ...(lotContext
+          ? { targetLot: { number: lotContext.number, title: lotContext.title } }
+          : {}),
       },
     },
   };
@@ -344,6 +368,14 @@ async function updateQueue(
 
 function normalizedLotKey(value: string): string {
   return value.trim().toLocaleLowerCase("fr").replace(/\s+/g, "-");
+}
+
+// The DB source_lot_key is authoritative when present (never rebuilt);
+// otherwise fall back to the same number-based key the market path builds.
+function sourceLotKeyOf(lot: AnalysisWritePayload["lots"][number]): string {
+  if (lot.sourceLotKey !== null) return lot.sourceLotKey;
+  if (lot.number !== null) return `number:${normalizedLotKey(lot.number)}`;
+  throw new Error("ANALYZE_LOT_KEY_MISSING");
 }
 
 async function writeAnalysis(
@@ -367,7 +399,12 @@ async function writeAnalysis(
     };
   }).update({
     ...payload.tenderValues,
-    analysis_state: assembly.coverage.complete ? "completed" : "partial",
+    // Direct lot: analysis_state (and every score/state field) is owned by the
+    // sync RPC, which also honours fit_locked_by. The direct UPDATE only
+    // carries the neutral fields prepared by buildAnalysisWritePayload.
+    ...(assembly.lot
+      ? {}
+      : { analysis_state: assembly.coverage.complete ? "completed" : "partial" }),
   })
     .eq("id", payload.tenderId)
     .is("deleted_at", null)
@@ -384,12 +421,20 @@ async function writeAnalysis(
   const analysisState = assembly.coverage.complete
     ? "documentary_complete"
     : "documentary_partial";
-  if (assembly.recordType === "market" && payload.lots.length > 0) {
+  if (
+    (assembly.recordType === "market" || assembly.lot !== null) &&
+    payload.lots.length > 0
+  ) {
     const result = await client.rpc("sync_tender_lot_analysis", {
-      p_parent_tender_id: payload.tenderId,
+      // Direct lot: the RPC is addressed to the MARKET PARENT, which locks the
+      // parent row and matches this single lot by source_lot_key/number. One
+      // payload entry = one lot touched; the sibling lots stay untouched.
+      p_parent_tender_id: assembly.lot
+        ? assembly.lot.parentTenderId
+        : payload.tenderId,
       p_analysis_state: analysisState,
       p_lots: payload.lots.map((lot) => ({
-        source_lot_key: `number:${normalizedLotKey(lot.number)}`,
+        source_lot_key: sourceLotKeyOf(lot),
         lot_number: lot.number,
         lot_title: lot.title,
         relevance_score: lot.relevanceScore,

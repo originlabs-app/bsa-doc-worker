@@ -298,6 +298,101 @@ describe("runAnalyzeService", () => {
     }));
   });
 
+  it("writes a direct lot without score/state on the tender and one lot entry", async () => {
+    const sink: AnalysisResultSink = { write: vi.fn().mockResolvedValue(undefined) };
+
+    const report = await runAnalyzeService({
+      config: config("apply"),
+      dossier,
+      lot: {
+        parentTenderId: "parent-1",
+        number: "Lot n°01",
+        title: "Gros œuvre",
+        sourceLotKey: "boamp:lot-1",
+      },
+      client: client(),
+      recallLearning: vi.fn().mockResolvedValue(learning),
+      sink,
+      now: () => new Date("2026-07-20T20:00:00.000Z"),
+    });
+
+    expect(report.status).toBe("analyzed");
+    expect(sink.write).toHaveBeenCalledTimes(1);
+    const payload = vi.mocked(sink.write).mock.calls[0]?.[0];
+    expect(payload?.tenderValues).not.toHaveProperty("relevance_score");
+    expect(payload?.tenderValues).not.toHaveProperty("relevance_reason");
+    expect(payload?.tenderValues).not.toHaveProperty("scored_at");
+    expect(payload?.tenderValues).not.toHaveProperty("analysis_state");
+    expect(payload?.tenderValues).toMatchObject({
+      dce_analyzed_at: "2026-07-20T20:00:00.000Z",
+      ai_analysis_model: "openai/gpt-5.6-terra",
+    });
+    // "Lot n°01" matches unit "1": the lot receives that unit's score.
+    expect(payload?.lots).toEqual([expect.objectContaining({
+      sourceLotKey: "boamp:lot-1",
+      number: "Lot n°01",
+      title: "Gros œuvre",
+      relevanceScore: 100,
+      verdict: "recommended",
+    })]);
+  });
+
+  it("leaves the direct lot score null when no unit matches the lot", async () => {
+    const sink: AnalysisResultSink = { write: vi.fn().mockResolvedValue(undefined) };
+
+    await runAnalyzeService({
+      config: config("apply"),
+      dossier,
+      lot: {
+        parentTenderId: "parent-1",
+        number: "7",
+        title: "Plomberie",
+        sourceLotKey: null,
+      },
+      client: client(),
+      recallLearning: vi.fn().mockResolvedValue(learning),
+      sink,
+      now: () => new Date("2026-07-20T20:00:00.000Z"),
+    });
+
+    const payload = vi.mocked(sink.write).mock.calls[0]?.[0];
+    expect(payload?.lots).toEqual([expect.objectContaining({
+      sourceLotKey: null,
+      number: "7",
+      relevanceScore: null,
+      verdict: null,
+      summary: null,
+      relevanceReason:
+        "Lot non retrouvé avec certitude dans les documents analysés",
+    })]);
+  });
+
+  it("matches the direct lot by title when the number is absent", async () => {
+    const sink: AnalysisResultSink = { write: vi.fn().mockResolvedValue(undefined) };
+
+    await runAnalyzeService({
+      config: config("apply"),
+      dossier,
+      lot: {
+        parentTenderId: "parent-1",
+        number: null,
+        title: "Lot Électricité",
+        sourceLotKey: "boamp:lot-2",
+      },
+      client: client(),
+      recallLearning: vi.fn().mockResolvedValue(learning),
+      sink,
+      now: () => new Date("2026-07-20T20:00:00.000Z"),
+    });
+
+    const payload = vi.mocked(sink.write).mock.calls[0]?.[0];
+    expect(payload?.lots).toEqual([expect.objectContaining({
+      sourceLotKey: "boamp:lot-2",
+      relevanceScore: 60,
+      verdict: expect.any(String),
+    })]);
+  });
+
   it("fails closed before analysis when apply has no sink", async () => {
     const generate = vi.fn();
     const promise = runAnalyzeService({

@@ -17,6 +17,7 @@ const assembly: AnalyzeDossierAssembly = {
   queue: { queueId: "queue-1", tenderId: "tender-1", attempts: 0 },
   companyId: "company-1",
   recordType: "market",
+  lot: null,
   existingScore: 72,
   deadlineDate: null,
   coverage: {
@@ -223,6 +224,47 @@ describe("runAnalyzeOneShot", () => {
       "queue-1",
       "2026-07-20T20:00:00.000Z",
     );
+  });
+
+  it("forwards the direct lot context from the assembly to the written payload", async () => {
+    const sink = { write: vi.fn().mockResolvedValue(undefined) };
+    const writes = applyStore(sink);
+    const lotAssembly: AnalyzeDossierAssembly = {
+      ...assembly,
+      recordType: "lot",
+      lot: {
+        parentTenderId: "parent-1",
+        number: "1",
+        title: "Rénovation",
+        sourceLotKey: "boamp:lot-1",
+      },
+    };
+
+    const report = await runAnalyzeOneShot(config("apply"), {
+      readStore: readStore({
+        assembleCandidate: vi.fn().mockResolvedValue({
+          status: "ready",
+          assembly: lotAssembly,
+        }),
+      }),
+      applyStore: writes,
+      client: generationClient(),
+      recallLearning: vi.fn().mockResolvedValue(learning),
+    }, { now: () => new Date("2026-07-20T20:00:00.000Z") });
+
+    expect(report).toMatchObject({ mode: "apply", status: "analyzed" });
+    expect(writes.createResultSink).toHaveBeenCalledWith(lotAssembly);
+    expect(sink.write).toHaveBeenCalledWith(expect.objectContaining({
+      lots: [expect.objectContaining({
+        sourceLotKey: "boamp:lot-1",
+        number: "1",
+        relevanceScore: 100,
+      })],
+    }));
+    const payload = sink.write.mock.calls[0]?.[0] as {
+      tenderValues: Record<string, unknown>;
+    };
+    expect(payload.tenderValues).not.toHaveProperty("relevance_score");
   });
 
   it("does not expose provider error bodies in operational issues", async () => {
