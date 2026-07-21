@@ -32,12 +32,17 @@ export interface PortalCandidate {
   reference: string;
   buyerName: string;
   consultationUrl: string;
+  lotTitles?: string[];
+  deadlineAt?: string;
+  recoveryDisposition?: "recoverable" | "external_blocked";
+  blockedExternalHost?: string;
 }
 
 export interface PortalSearchResult {
   portal: RecoveryPortal;
   candidates: PortalCandidate[];
   blockedExternalHost?: string;
+  requestCount?: number;
   errorCode?: string;
 }
 
@@ -45,9 +50,16 @@ export interface MatchEvidence {
   level: RecoveryDecision;
   referenceExact: boolean;
   buyerExact: boolean;
+  buyerMatched: boolean;
+  buyerTokenOverlap: number;
+  buyerSharedTokens: number;
+  titleMatched: boolean;
+  titlePrefixMatch: boolean;
   titleJaccard: number;
   lotTokenHits: number;
   lotTitleMatches: number;
+  deadlineStatus: "coherent" | "expired" | "unknown";
+  placeUmbrellaCompatible: boolean;
   candidate: PortalCandidate;
 }
 

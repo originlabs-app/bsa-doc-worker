@@ -16,6 +16,7 @@
     "analyze": "tsx src/analyze/cli.ts",
     "analyze:start": "node dist/analyze/cli.js",
     "recovery": "tsx src/recovery/cli.ts",
+    "probe:recovery-search": "tsx scripts/probe-recovery-search.ts",
     "recovery:start": "node dist/recovery/cli.js",
     "worker": "tsx src/cli.ts",
     "reader": "tsx src/reader/cli.ts",

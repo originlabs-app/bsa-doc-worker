@@ -7,11 +7,17 @@ export interface PortalConsultationCandidate {
   reference: string;
   buyerName: string;
   consultationUrl: string;
+  lotTitles?: string[];
+  deadlineAt?: string;
+  recoveryDisposition?: "recoverable" | "external_blocked";
+  blockedExternalHost?: string;
+  lotDetailUrl?: string;
 }
 
 export interface PortalPublicCandidateResult {
   candidates: PortalConsultationCandidate[];
   blockedExternalHosts: string[];
+  requestCount?: number;
 }
 
 interface PortalResolutionHints {
@@ -36,13 +42,18 @@ export type PortalSearchOutcome =
   | { type: "not_found"; portal: PortalName };
 
 const NON_DISTINCTIVE_TERMS = new Set([
+  "agrandissement",
+  "amenagement",
   "batiments",
   "centre",
   "construction",
   "controles",
+  "decheterie",
   "equipements",
   "extension",
+  "gardien",
   "groupe",
+  "local",
   "musee",
   "nouveau",
   "patrimoniale",
@@ -60,6 +71,8 @@ const NON_DISTINCTIVE_TERMS = new Set([
 
 const MAX_SEARCH_RESPONSE_BYTES = 5 * 1024 * 1024;
 const SEARCH_TIMEOUT_MS = 20_000;
+const MAX_PORTAL_REQUESTS = 8;
+const MAX_SEARCH_QUERIES = 4;
 
 function normalize(value: string): string {
   return value
@@ -130,6 +143,92 @@ function withoutLabel(value: string, label: RegExp): string {
   return cleanText(value).replace(label, "").trim();
 }
 
+function withoutPostalSuffix(value: string): string {
+  return cleanText(value).replace(/\s*\(\s*\d{5}\b[^)]*\)\s*$/, "").trim();
+}
+
+function cleanReference(value: string): string {
+  const cleaned = cleanText(value).replace(/^\[|\]$/g, "").trim();
+  return cleaned
+    .replace(/^(?:réf(?:érence)?|ref(?:erence)?)(?:\s+acheteur)?\s*[.:]?\s*/i, "")
+    .replace(/\]$/, "")
+    .trim();
+}
+
+function parisLocalToIso(
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+): string {
+  const utcGuess = Date.UTC(year, month - 1, day, hour, minute);
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/Paris",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date(utcGuess));
+  const values = Object.fromEntries(parts.map(({ type, value }) => [type, value]));
+  const represented = Date.UTC(
+    Number(values.year),
+    Number(values.month) - 1,
+    Number(values.day),
+    Number(values.hour),
+    Number(values.minute),
+  );
+  return new Date(utcGuess - (represented - utcGuess)).toISOString();
+}
+
+function parseFrenchDeadline(value: string): string | undefined {
+  const match = cleanText(value).match(
+    /\b(\d{1,2})\/(\d{1,2})\/(\d{2,4})\b[^\d]{0,20}(\d{1,2})(?::|h)(\d{2})\b/i,
+  );
+  if (!match) return undefined;
+  const shortYear = Number(match[3]);
+  const year = shortYear < 100 ? 2000 + shortYear : shortYear;
+  const month = Number(match[2]);
+  const day = Number(match[1]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  if (
+    month < 1 || month > 12 || day < 1 || day > 31 ||
+    hour < 0 || hour > 23 || minute < 0 || minute > 59
+  ) return undefined;
+  return parisLocalToIso(year, month, day, hour, minute);
+}
+
+function parseAtexoDeadlineParts(
+  dayValue: string,
+  monthValue: string,
+  yearValue: string,
+  timeValue: string,
+): string | undefined {
+  const months: Record<string, number> = {
+    janv: 1,
+    fevr: 2,
+    mars: 3,
+    avr: 4,
+    mai: 5,
+    juin: 6,
+    juil: 7,
+    aout: 8,
+    sept: 9,
+    oct: 10,
+    nov: 11,
+    dec: 12,
+  };
+  const day = Number(cleanText(dayValue));
+  const month = months[normalize(monthValue).replaceAll(" ", "")];
+  const year = Number(cleanText(yearValue));
+  const time = cleanText(timeValue).match(/(\d{1,2}):([0-5]\d)/);
+  if (!month || !time || day < 1 || day > 31 || year < 2000) return undefined;
+  return parisLocalToIso(year, month, day, Number(time[1]), Number(time[2]));
+}
+
 function safeHttpsUrl(rawUrl: string | undefined, baseUrl: string): URL | null {
   if (!rawUrl) return null;
   try {
@@ -141,11 +240,8 @@ function safeHttpsUrl(rawUrl: string | undefined, baseUrl: string): URL | null {
 }
 
 function isAwDceUrl(url: URL): boolean {
-  const isAwHost =
-    url.hostname === "marches-publics.info" ||
-    url.hostname.endsWith(".marches-publics.info");
   return (
-    isAwHost &&
+    url.origin === "https://www.marches-publics.info" &&
     url.pathname.toLowerCase().endsWith("/mpiaws/index.cfm") &&
     (url.searchParams.get("fuseaction") ?? "").toLowerCase() ===
       "dematent.login" &&
@@ -184,84 +280,59 @@ async function postPublicSearch(
   body: URLSearchParams,
   fetchImpl: typeof fetch,
 ): Promise<string> {
-  let response = await fetchImpl(url, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body,
+  const budget = { count: 0 };
+  return boundedHtmlRequest(
+    new URL(url),
+    {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body,
+    },
+    new URL(url).origin,
+    budget,
+    fetchImpl,
+  );
+}
+
+interface RequestBudget {
+  count: number;
+}
+
+async function boundedHtmlRequest(
+  url: URL,
+  init: RequestInit,
+  expectedOrigin: string,
+  budget: RequestBudget,
+  fetchImpl: typeof fetch,
+): Promise<string> {
+  if (url.protocol !== "https:" || url.origin !== expectedOrigin) {
+    throw new Error("PORTAL_SEARCH_URL_BLOCKED");
+  }
+  if (budget.count >= MAX_PORTAL_REQUESTS) {
+    throw new Error("PORTAL_SEARCH_REQUEST_LIMIT");
+  }
+  budget.count += 1;
+  const response = await fetchImpl(url, {
+    ...init,
     redirect: "manual",
     signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
   });
-  if ([302, 303].includes(response.status)) {
+  if ([301, 302, 303, 307, 308].includes(response.status)) {
     const redirectUrl = safeHttpsUrl(
       response.headers.get("location") ?? undefined,
-      url,
+      url.toString(),
     );
-    if (!redirectUrl || redirectUrl.origin !== new URL(url).origin) {
+    if (!redirectUrl || redirectUrl.origin !== expectedOrigin) {
       throw new Error("PORTAL_SEARCH_REDIRECT_BLOCKED");
     }
-    response = await fetchImpl(redirectUrl, {
-      method: "GET",
-      redirect: "error",
-      signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
-    });
-  }
-  return readBoundedHtml(response);
-}
-
-function safeCookieHeader(response: Response): string {
-  const cookies = response.headers
-    .getSetCookie()
-    .map((value) => value.split(";", 1)[0] ?? "")
-    .filter((value) =>
-      /^[A-Za-z0-9!#$%&'*+.^_`|~-]+=[^;\r\n]{0,4096}$/.test(value),
+    return boundedHtmlRequest(
+      redirectUrl,
+      { method: "GET" },
+      expectedOrigin,
+      budget,
+      fetchImpl,
     );
-  const header = cookies.join("; ");
-  return header.length <= 8_192 ? header : "";
-}
-
-function placeResultCount(html: string): number {
-  const $ = load(html);
-  const rawCount = cleanText(
-    $("#ctl0_CONTENU_PAGE_resultSearch_nombreElement").first().text(),
-  );
-  const count = Number(rawCount);
-  return Number.isSafeInteger(count) && count >= 0 ? count : 0;
-}
-
-async function expandPlaceResults(
-  html: string,
-  cookieHeader: string,
-  fetchImpl: typeof fetch,
-  origin = "https://www.marches-publics.gouv.fr",
-): Promise<string> {
-  const $ = load(html);
-  const pageState = $("#PRADO_PAGESTATE").attr("value") ?? "";
-  const action = $("form#ctl0_ctl1").attr("action");
-  const actionUrl = safeHttpsUrl(action, origin);
-  if (
-    !pageState ||
-    pageState.length > MAX_SEARCH_RESPONSE_BYTES ||
-    !actionUrl ||
-    actionUrl.origin !== origin
-  ) {
-    throw new Error("PORTAL_SEARCH_EXPANSION_BLOCKED");
   }
-
-  const body = new URLSearchParams({
-    PRADO_PAGESTATE: pageState,
-    "ctl0$CONTENU_PAGE$resultSearch$listePageSizeTop": "20",
-  });
-  const headers: Record<string, string> = {
-    "content-type": "application/x-www-form-urlencoded",
-  };
-  if (cookieHeader) headers.Cookie = cookieHeader;
-  const response = await fetchImpl(actionUrl, {
-    method: "POST",
-    headers,
-    body,
-    redirect: "error",
-    signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
-  });
   return readBoundedHtml(response);
 }
 
@@ -400,20 +471,27 @@ export function parseAwPublicCandidates(
     const titleBox = $(element).find("#titre_box").first().clone();
     titleBox.find(".ref-acheteur, p").remove();
     const canonicalTitle = cleanText(titleBox.text());
-    const reference = withoutLabel(
+    const reference = cleanReference(
       $(element).find(".ref-acheteur, [class*='reference']").first().text(),
-      /^(?:référence(?:\s+acheteur)?|reference(?:\s+acheteur)?)\s*:\s*/i,
     );
-    const buyerElement = $(element)
+    const headingBuyer = withoutPostalSuffix(
+      $(element).find("h2.h2-avis").first().text(),
+    );
+    const labelledBuyer = $(element)
       .find(".acheteur:not(.ref-acheteur), .buyer, p")
       .filter((_index, candidate) =>
         /^(?:acheteur|buyer)\s*:/i.test(cleanText($(candidate).text())),
       )
-      .first();
-    const buyerName = withoutLabel(
-      buyerElement.text(),
+      .first()
+      .text();
+    const buyerName = headingBuyer || withoutLabel(
+      labelledBuyer,
       /^(?:acheteur|buyer)\s*:\s*/i,
     );
+    const deadlineAt = parseFrenchDeadline($(element).text());
+    let dceUrl: URL | null = null;
+    let noticeUrl: URL | null = null;
+    let blockedExternalHost: string | undefined;
 
     for (const anchor of $(element).find("a[href]").toArray()) {
       const label = cleanText($(anchor).text());
@@ -425,21 +503,45 @@ export function parseAwPublicCandidates(
       if (!url) continue;
       if (
         (label === "DCE" || /Dossier de Consultation/i.test(title)) &&
-        isAwDceUrl(url) &&
-        canonicalTitle
+        isAwDceUrl(url)
       ) {
-        candidates.push({
-          canonicalTitle,
-          reference,
-          buyerName,
-          consultationUrl: url.toString(),
-        });
+        dceUrl = url;
       } else if (
         (label === "Déposer un pli" || /Candidature et\/ou Offre/i.test(title)) &&
         !isHostOrSubdomain(url.hostname.toLowerCase(), "marches-publics.info")
       ) {
-        blockedExternalHosts.add(url.hostname.toLowerCase());
+        blockedExternalHost = url.hostname.toLowerCase();
+        blockedExternalHosts.add(blockedExternalHost);
+      } else if (
+        url.origin === "https://www.marches-publics.info" &&
+        /^\/Annonces\/MPI-pub-\d+\.htm$/i.test(url.pathname)
+      ) {
+        noticeUrl = url;
       }
+    }
+
+    if (!canonicalTitle) continue;
+    if (dceUrl) {
+      candidates.push({
+        canonicalTitle,
+        reference,
+        buyerName,
+        consultationUrl: dceUrl.toString(),
+        lotTitles: [],
+        ...(deadlineAt ? { deadlineAt } : {}),
+        recoveryDisposition: "recoverable",
+      });
+    } else if (noticeUrl && blockedExternalHost) {
+      candidates.push({
+        canonicalTitle,
+        reference,
+        buyerName,
+        consultationUrl: noticeUrl.toString(),
+        lotTitles: [],
+        ...(deadlineAt ? { deadlineAt } : {}),
+        recoveryDisposition: "external_blocked",
+        blockedExternalHost,
+      });
     }
   }
   return {
@@ -462,6 +564,7 @@ function isAtexoConsultationUrl(
   if (/^\/app\.php\/entreprise\/consultation\/\d+$/.test(url.pathname)) {
     return true;
   }
+  if (/^\/entreprise\/consultation\/\d+$/.test(url.pathname)) return true;
   return (
     url.pathname.toLowerCase().endsWith("/index.php") &&
     (url.searchParams.get("page") ?? "") ===
@@ -478,20 +581,32 @@ export function parseAtexoPublicCandidates(
   const candidates: PortalConsultationCandidate[] = [];
   for (const element of $(".item_consultation").toArray()) {
     const canonicalTitle = cleanText(
-      $(element).find(".objet-line [title]").first().attr("title") ??
+      $(element).find(".objet-line .truncate span[title]").first().attr("title") ??
+        $(element).find(".objet-line span[title]").first().attr("title") ??
         $(element).find(".objet-line").first().text(),
     );
-    const reference = withoutLabel(
-      $(element).find(".reference, [class*='reference']").first().text(),
-      /^(?:référence|reference)\s*:\s*/i,
-    );
-    const buyerName = withoutLabel(
+    const reference = cleanReference(
       $(element)
-        .find(".acheteur, [class*='acheteur'], [class*='organisme']")
+        .find(".objet-line .m-b-1 .small.pull-left, .reference, [class*='reference']")
         .first()
         .text(),
-      /^(?:acheteur|organisme)\s*:\s*/i,
     );
+    const buyerNode = $(element)
+      .find(
+        "[id$='panelBlocDenomination'] .truncate-700[title], .panelBlocDenomination .truncate-700[title], .acheteur, [class*='acheteur'], [class*='organisme']",
+      )
+      .first();
+    const buyerName = withoutPostalSuffix(withoutLabel(
+      buyerNode.attr("title") ?? buyerNode.text(),
+      /^(?:acheteur|organisme)\s*:\s*/i,
+    ));
+    const deadlineNode = $(element).find(".cons_dateEnd").first();
+    const deadlineAt = parseAtexoDeadlineParts(
+      deadlineNode.find(".day").first().text(),
+      deadlineNode.find(".month").first().text(),
+      deadlineNode.find(".year").first().text(),
+      deadlineNode.find(".time").first().text(),
+    ) ?? parseFrenchDeadline(deadlineNode.text());
     const href = $(element)
       .find("a[href]")
       .filter((_index, anchor) =>
@@ -500,6 +615,20 @@ export function parseAtexoPublicCandidates(
       .first()
       .attr("href");
     const consultationUrl = safeHttpsUrl(href, atexoOrigin(portal));
+    const lotAnchor = $(element)
+      .find("a[href*='Entreprise.PopUpDetailLots']")
+      .first()
+      .attr("href");
+    const lotPath = lotAnchor?.match(
+      /['"]([^'"]*page=Entreprise\.PopUpDetailLots[^'"]*)['"]/,
+    )?.[1] ?? lotAnchor;
+    const lotDetailUrl = safeHttpsUrl(lotPath, atexoOrigin(portal));
+    const safeLotDetailUrl =
+      lotDetailUrl?.origin === atexoOrigin(portal) &&
+      lotDetailUrl.searchParams.get("page") === "Entreprise.PopUpDetailLots" &&
+      /^\d+$/.test(lotDetailUrl.searchParams.get("id") ?? "")
+        ? lotDetailUrl.toString()
+        : undefined;
     if (
       canonicalTitle &&
       consultationUrl &&
@@ -510,80 +639,131 @@ export function parseAtexoPublicCandidates(
         reference,
         buyerName,
         consultationUrl: consultationUrl.toString(),
+        lotTitles: [],
+        ...(deadlineAt ? { deadlineAt } : {}),
+        recoveryDisposition: "recoverable",
+        ...(safeLotDetailUrl ? { lotDetailUrl: safeLotDetailUrl } : {}),
       });
     }
   }
   return { candidates: candidates.slice(0, 100), blockedExternalHosts: [] };
 }
 
-async function searchAtexoPublicCandidates(
+function atexoSearchUrl(
   portal: "place" | "maximilien",
   query: string,
-  fetchImpl: typeof fetch,
-): Promise<PortalPublicCandidateResult> {
+): URL {
   const origin = atexoOrigin(portal);
-  const searchUrl = `${origin}/espace-entreprise/search`;
-  const firstResponse = await fetchImpl(searchUrl, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      fromHomeSimpleSearch: "1",
-      categorie: "0",
-      keyWord: query,
-    }),
-    redirect: "manual",
-    signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
-  });
-  if (![302, 303].includes(firstResponse.status)) {
-    return parseAtexoPublicCandidates(
-      await readBoundedHtml(firstResponse),
-      portal,
-    );
-  }
+  const url = new URL("/", origin);
+  url.searchParams.set("page", "Entreprise.EntrepriseAdvancedSearch");
+  url.searchParams.set("searchAnnCons", "");
+  url.searchParams.set("keyWord", query);
+  return url;
+}
 
-  const redirectUrl = safeHttpsUrl(
-    firstResponse.headers.get("location") ?? undefined,
-    searchUrl,
-  );
-  if (!redirectUrl || redirectUrl.origin !== origin) {
-    throw new Error("PORTAL_SEARCH_REDIRECT_BLOCKED");
+function parseAtexoLotTitles(html: string): string[] {
+  const $ = load(html);
+  const titles = new Set<string>();
+  for (const heading of $(".panel-heading").toArray()) {
+    const titled = cleanText($(heading).find("[title]").last().attr("title") ?? "");
+    const text = cleanText($(heading).text()).replace(
+      /^Lot\s+(?:n[°o]?\s*)?\d+\s*:\s*/i,
+      "",
+    );
+    const title = titled || text;
+    if (title) titles.add(title);
   }
-  const cookieHeader = safeCookieHeader(firstResponse);
-  const secondResponse = await fetchImpl(redirectUrl, {
-    method: "GET",
-    ...(cookieHeader ? { headers: { Cookie: cookieHeader } } : {}),
-    redirect: "error",
-    signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
-  });
-  let html = await readBoundedHtml(secondResponse);
-  const resultCount = placeResultCount(html);
-  if (resultCount > 20) throw new Error("PORTAL_SEARCH_RESULT_CAP_REACHED");
-  if (resultCount > 10) {
-    html = await expandPlaceResults(html, cookieHeader, fetchImpl, origin);
+  return [...titles];
+}
+
+function boundedQueries(queries: readonly string[] | string): string[] {
+  const values = typeof queries === "string" ? [queries] : queries;
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    const query = cleanText(value);
+    const key = normalize(query);
+    if (!query || seen.has(key)) continue;
+    seen.add(key);
+    result.push(query);
+    if (result.length === MAX_SEARCH_QUERIES) break;
   }
-  return parseAtexoPublicCandidates(html, portal);
+  return result;
 }
 
 export async function searchPortalPublicCandidates(
   portal: PortalName,
-  query: string,
+  queries: readonly string[] | string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<PortalPublicCandidateResult> {
-  if (portal === "aw_solutions") {
-    const html = await postPublicSearch(
-      "https://www.marches-publics.info/Annonces/lister",
-      new URLSearchParams({
-        IDE: "EC",
-        IDN: "X",
-        IDR: "X",
-        txtLibre: query,
-        Rechercher: "Rechercher",
-      }),
-      fetchImpl,
-    );
-    return parseAwPublicCandidates(html);
+  const budget = { count: 0 };
+  const candidates: PortalConsultationCandidate[] = [];
+  const blockedExternalHosts = new Set<string>();
+  for (const query of boundedQueries(queries)) {
+    let parsed: PortalPublicCandidateResult;
+    if (portal === "aw_solutions") {
+      const origin = "https://www.marches-publics.info";
+      const html = await boundedHtmlRequest(
+        new URL("/Annonces/lister", origin),
+        {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            IDE: "EC",
+            IDN: "X",
+            IDR: "X",
+            txtLibre: query,
+            Rechercher: "Rechercher",
+          }),
+        },
+        origin,
+        budget,
+        fetchImpl,
+      );
+      parsed = parseAwPublicCandidates(html);
+    } else {
+      const origin = atexoOrigin(portal);
+      const html = await boundedHtmlRequest(
+        atexoSearchUrl(portal, query),
+        { method: "GET" },
+        origin,
+        budget,
+        fetchImpl,
+      );
+      parsed = parseAtexoPublicCandidates(html, portal);
+    }
+    candidates.push(...parsed.candidates);
+    for (const host of parsed.blockedExternalHosts) {
+      blockedExternalHosts.add(host);
+    }
+    if (parsed.candidates.length > 0) break;
   }
-  return searchAtexoPublicCandidates(portal, query, fetchImpl);
+
+  if (portal !== "aw_solutions") {
+    const origin = atexoOrigin(portal);
+    for (const candidate of candidates) {
+      if (!candidate.lotDetailUrl || budget.count >= MAX_PORTAL_REQUESTS) break;
+      const html = await boundedHtmlRequest(
+        new URL(candidate.lotDetailUrl),
+        { method: "GET" },
+        origin,
+        budget,
+        fetchImpl,
+      );
+      candidate.lotTitles = parseAtexoLotTitles(html);
+    }
+  }
+
+  const deduplicated = [
+    ...new Map(
+      candidates.map((candidate) => [candidate.consultationUrl, candidate]),
+    ).values(),
+  ].slice(0, 100);
+  return {
+    candidates: deduplicated,
+    blockedExternalHosts: [...blockedExternalHosts].sort(),
+    requestCount: budget.count,
+  };
 }
 
 export async function searchAwPublic(
@@ -609,49 +789,14 @@ export async function searchPlacePublic(
   truncatedTitle: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<PortalSearchOutcome> {
-  const body = new URLSearchParams({
-    fromHomeSimpleSearch: "1",
-    categorie: "0",
-    keyWord: buildDistinctiveQuery(truncatedTitle),
-  });
-  const searchUrl =
-    "https://www.marches-publics.gouv.fr/espace-entreprise/search";
-  const firstResponse = await fetchImpl(searchUrl, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body,
-    redirect: "manual",
-    signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
-  });
-  if (![302, 303].includes(firstResponse.status)) {
-    const html = await readBoundedHtml(firstResponse);
-    return parsePlacePublicSearch(html, truncatedTitle);
-  }
-
-  const redirectUrl = safeHttpsUrl(
-    firstResponse.headers.get("location") ?? undefined,
-    searchUrl,
+  const origin = "https://www.marches-publics.gouv.fr";
+  const budget = { count: 0 };
+  const html = await boundedHtmlRequest(
+    atexoSearchUrl("place", buildDistinctiveQuery(truncatedTitle)),
+    { method: "GET" },
+    origin,
+    budget,
+    fetchImpl,
   );
-  if (
-    !redirectUrl ||
-    redirectUrl.origin !== "https://www.marches-publics.gouv.fr"
-  ) {
-    throw new Error("PORTAL_SEARCH_REDIRECT_BLOCKED");
-  }
-  const cookieHeader = safeCookieHeader(firstResponse);
-  const secondResponse = await fetchImpl(redirectUrl, {
-    method: "GET",
-    ...(cookieHeader ? { headers: { Cookie: cookieHeader } } : {}),
-    redirect: "error",
-    signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
-  });
-  let html = await readBoundedHtml(secondResponse);
-  const firstOutcome = parsePlacePublicSearch(html, truncatedTitle);
-  if (firstOutcome.type === "recoverable") return firstOutcome;
-
-  const resultCount = placeResultCount(html);
-  if (resultCount <= 10) return firstOutcome;
-  if (resultCount > 20) throw new Error("PORTAL_SEARCH_RESULT_CAP_REACHED");
-  html = await expandPlaceResults(html, cookieHeader, fetchImpl);
   return parsePlacePublicSearch(html, truncatedTitle);
 }

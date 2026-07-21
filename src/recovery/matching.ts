@@ -5,11 +5,15 @@ import type {
 } from "./contracts.js";
 
 const STOP_WORDS = new Set([
+  "a",
+  "au",
+  "aux",
   "avec",
   "dans",
   "des",
   "de",
   "du",
+  "en",
   "et",
   "la",
   "le",
@@ -17,8 +21,54 @@ const STOP_WORDS = new Set([
   "lot",
   "lots",
   "pour",
+  "sur",
   "travaux",
 ]);
+
+const BUYER_GENERIC_WORDS = new Set([
+  "agglomeration",
+  "centre",
+  "chu",
+  "communaute",
+  "commune",
+  "conseil",
+  "departement",
+  "etablissement",
+  "ghu",
+  "habitat",
+  "hlm",
+  "hospitalier",
+  "hopital",
+  "hopitaux",
+  "mairie",
+  "metropole",
+  "ministere",
+  "oph",
+  "public",
+  "publique",
+  "regional",
+  "region",
+  "sa",
+  "sante",
+  "societe",
+  "ville",
+]);
+
+const GEOGRAPHIC_ORGANIZATION_WORDS = new Set([
+  "communaute",
+  "commune",
+  "departement",
+  "eurometropole",
+  "mairie",
+  "metropole",
+  "regional",
+  "region",
+  "ville",
+]);
+
+interface MatchingOptions {
+  now?: Date;
+}
 
 function normalize(value: string): string {
   return value
@@ -34,13 +84,31 @@ function normalizedReference(value: string): string {
   return normalize(value).replaceAll(" ", "");
 }
 
-function distinctiveTokens(value: string): Set<string> {
+function lightStem(token: string): string {
+  if (token.length < 4) return token;
+  if (token.endsWith("aux") && token.length > 5) {
+    return `${token.slice(0, -3)}al`;
+  }
+  return /[sx]$/.test(token) ? token.slice(0, -1) : token;
+}
+
+function normalizedStemmed(value: string): string {
+  return normalize(value).split(" ").map(lightStem).join(" ");
+}
+
+function distinctiveTokens(
+  value: string,
+  extraStopWords: ReadonlySet<string> = new Set(),
+): Set<string> {
   return new Set(
     normalize(value)
       .split(" ")
+      .filter((token) => !STOP_WORDS.has(token))
+      .map(lightStem)
       .filter((token) => token.length >= 3)
       .filter((token) => !/^\d+$/.test(token))
-      .filter((token) => !STOP_WORDS.has(token)),
+      .filter((token) => !STOP_WORDS.has(token))
+      .filter((token) => !extraStopWords.has(token)),
   );
 }
 
@@ -56,48 +124,181 @@ function jaccard(left: Set<string>, right: Set<string>): number {
   return intersection / (left.size + right.size - intersection);
 }
 
+function titlePrefixMatch(left: string, right: string): boolean {
+  const normalizedLeft = normalizedStemmed(left);
+  const normalizedRight = normalizedStemmed(right);
+  const shorter = normalizedLeft.length <= normalizedRight.length
+    ? normalizedLeft
+    : normalizedRight;
+  const longer = normalizedLeft.length <= normalizedRight.length
+    ? normalizedRight
+    : normalizedLeft;
+  return shorter.length >= 20 && longer.startsWith(shorter);
+}
+
+function containsGeographicOrganizationWord(value: string): boolean {
+  return normalize(value)
+    .split(" ")
+    .some((token) => GEOGRAPHIC_ORGANIZATION_WORDS.has(token));
+}
+
+function buyerEvidence(
+  targetBuyer: string,
+  candidateBuyer: string,
+): {
+  exact: boolean;
+  matched: boolean;
+  overlap: number;
+  shared: number;
+} {
+  const exact = normalize(targetBuyer).length > 0 &&
+    normalize(targetBuyer) === normalize(candidateBuyer);
+  const targetTokens = distinctiveTokens(targetBuyer, BUYER_GENERIC_WORDS);
+  const candidateTokens = distinctiveTokens(candidateBuyer, BUYER_GENERIC_WORDS);
+  const shared = intersectionSize(targetTokens, candidateTokens);
+  const denominator = Math.min(targetTokens.size, candidateTokens.size);
+  const overlap = denominator === 0 ? 0 : shared / denominator;
+  const organizationMismatch =
+    containsGeographicOrganizationWord(targetBuyer) !==
+    containsGeographicOrganizationWord(candidateBuyer);
+  const geographicContext = containsGeographicOrganizationWord(targetBuyer) ||
+    containsGeographicOrganizationWord(candidateBuyer);
+  const tokenMatched = !organizationMismatch &&
+    (!geographicContext || shared >= 2) &&
+    ((overlap >= 0.75 && shared >= 1) || (overlap >= 0.5 && shared >= 2));
+  return { exact, matched: exact || tokenMatched, overlap, shared };
+}
+
+function matchedLots(
+  targetLots: readonly string[],
+  candidateLots: readonly string[],
+): number {
+  const possibleMatches: Array<{
+    targetIndex: number;
+    candidateIndex: number;
+    similarity: number;
+  }> = [];
+  for (const [targetIndex, targetLot] of targetLots.entries()) {
+    const targetTokens = distinctiveTokens(targetLot);
+    for (const [candidateIndex, candidateLot] of candidateLots.entries()) {
+      const similarity = jaccard(
+        targetTokens,
+        distinctiveTokens(candidateLot),
+      );
+      if (similarity >= 0.55) {
+        possibleMatches.push({ targetIndex, candidateIndex, similarity });
+      }
+    }
+  }
+  possibleMatches.sort((left, right) => right.similarity - left.similarity);
+  const usedTargets = new Set<number>();
+  const usedCandidates = new Set<number>();
+  for (const match of possibleMatches) {
+    if (
+      usedTargets.has(match.targetIndex) ||
+      usedCandidates.has(match.candidateIndex)
+    ) continue;
+    usedTargets.add(match.targetIndex);
+    usedCandidates.add(match.candidateIndex);
+  }
+  return usedTargets.size;
+}
+
+function deadlineStatus(
+  deadlineAt: string | undefined,
+  now: Date,
+): MatchEvidence["deadlineStatus"] {
+  if (!deadlineAt) return "unknown";
+  const deadline = new Date(deadlineAt);
+  if (Number.isNaN(deadline.getTime())) return "unknown";
+  return deadline.getTime() >= now.getTime() ? "coherent" : "expired";
+}
+
+function placeUmbrellaCompatible(
+  targetBuyer: string,
+  candidate: PortalCandidate,
+): boolean {
+  if (candidate.portal !== "place") return false;
+  const target = normalize(targetBuyer);
+  const buyer = normalize(candidate.buyerName);
+  const mappings: Array<{ entities: RegExp; umbrella: RegExp }> = [
+    { entities: /\b(?:oppic|drac|ensba)\b/, umbrella: /\bculture\b/ },
+    { entities: /\bsid\b/, umbrella: /\b(?:armees|defense)\b/ },
+    {
+      entities: /\b(?:ap hp|assistance publique hopitaux de paris|novo)\b/,
+      umbrella: /\bsante\b/,
+    },
+    { entities: /\bfilieris\b/, umbrella: /\bsecurite sociale\b/ },
+    {
+      entities: /\b(?:efs|etablissement francais du sang)\b/,
+      umbrella: /\b(?:ministeres sociaux|affaires sociales|travail)\b/,
+    },
+  ];
+  return mappings.some(
+    ({ entities, umbrella }) => entities.test(target) && umbrella.test(buyer),
+  );
+}
+
 export function classifyRecoveryCandidate(
   target: RecoveryTarget,
   candidate: PortalCandidate,
-  thresholds: { strong?: number; titleOnly?: number } = {},
+  options: MatchingOptions = {},
 ): MatchEvidence {
-  const strongThreshold = thresholds.strong ?? 0.5;
-  const titleOnlyThreshold = thresholds.titleOnly ?? 0.7;
   const targetTitleTokens = distinctiveTokens(target.title);
   const candidateTitleTokens = distinctiveTokens(candidate.canonicalTitle);
   const titleJaccard = jaccard(targetTitleTokens, candidateTitleTokens);
-  const referenceExact =
-    normalizedReference(target.reference).length > 0 &&
+  const prefixMatch = titlePrefixMatch(target.title, candidate.canonicalTitle);
+  const titleMatched = prefixMatch || titleJaccard >= 0.75;
+  const referenceExact = normalizedReference(target.reference).length > 0 &&
     normalizedReference(target.reference) ===
       normalizedReference(candidate.reference);
-  const buyerExact =
-    normalize(target.buyerName).length > 0 &&
-    normalize(target.buyerName) === normalize(candidate.buyerName);
+  const buyer = buyerEvidence(target.buyerName, candidate.buyerName);
+  const candidateLots = candidate.lotTitles ?? [];
+  const lotTitleMatches = matchedLots(target.lotTitles, candidateLots);
   const lotTokens = distinctiveTokens(target.lotTitles.join(" "));
-  const lotTokenHits = intersectionSize(lotTokens, candidateTitleTokens);
-  const lotTitleMatches = target.lotTitles.filter((lotTitle) =>
-    intersectionSize(distinctiveTokens(lotTitle), candidateTitleTokens) > 0
-  ).length;
+  const candidateLotTokens = distinctiveTokens(candidateLots.join(" "));
+  const lotTokenHits = intersectionSize(lotTokens, candidateLotTokens);
+  const deadline = deadlineStatus(candidate.deadlineAt, options.now ?? new Date());
+  const umbrellaCompatible = placeUmbrellaCompatible(target.buyerName, candidate);
+
+  const strongByTitleBuyer = titleMatched && buyer.matched;
+  const strongByTitleLots = titleMatched && lotTitleMatches >= 2;
+  const strongByBuyerLots = buyer.matched && lotTitleMatches >= 2;
+  const strongByLots = lotTitleMatches >= 3 && titleJaccard >= 0.4;
+  const otherwiseStrong = strongByTitleBuyer || strongByTitleLots ||
+    strongByBuyerLots || strongByLots;
+  const lotConfirmedStrong = strongByTitleLots || strongByBuyerLots || strongByLots;
+  const deadlineAllowsStrong = deadline === "coherent" ||
+    (deadline === "unknown" && lotConfirmedStrong);
 
   let level: MatchEvidence["level"] = "low";
-  if (referenceExact) {
+  if (referenceExact && (titleMatched || buyer.matched)) {
     level = "exact";
-  } else if (
-    (buyerExact && titleJaccard >= strongThreshold) ||
-    (titleJaccard >= titleOnlyThreshold && lotTitleMatches >= 2)
-  ) {
+  } else if (deadlineAllowsStrong && otherwiseStrong) {
     level = "strong";
-  } else if (buyerExact || titleJaccard >= 0.25 || lotTitleMatches >= 1) {
+  } else if (
+    titleMatched ||
+    (titleMatched && umbrellaCompatible) ||
+    (buyer.matched && titleJaccard >= 0.45) ||
+    otherwiseStrong
+  ) {
     level = "medium";
   }
 
   return {
     level,
     referenceExact,
-    buyerExact,
+    buyerExact: buyer.exact,
+    buyerMatched: buyer.matched,
+    buyerTokenOverlap: buyer.overlap,
+    buyerSharedTokens: buyer.shared,
+    titleMatched,
+    titlePrefixMatch: prefixMatch,
     titleJaccard,
     lotTokenHits,
     lotTitleMatches,
+    deadlineStatus: deadline,
+    placeUmbrellaCompatible: umbrellaCompatible,
     candidate,
   };
 }
@@ -127,10 +328,10 @@ export type ReconciliationResult =
 export function reconcilePortalCandidates(
   target: RecoveryTarget,
   candidates: readonly PortalCandidate[],
-  thresholds: { strong?: number; titleOnly?: number } = {},
+  options: MatchingOptions = {},
 ): ReconciliationResult {
   const evidence = candidates
-    .map((candidate) => classifyRecoveryCandidate(target, candidate, thresholds))
+    .map((candidate) => classifyRecoveryCandidate(target, candidate, options))
     .sort((left, right) =>
       RANK[right.level] - RANK[left.level] ||
       right.titleJaccard - left.titleJaccard ||
