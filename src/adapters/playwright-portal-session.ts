@@ -37,12 +37,13 @@ export interface PlaywrightPortalSessionOptions extends PortalCredentials {
   rootHost: string;
   displayName: string;
   timeoutMs?: number;
+  solveCaptchas?: boolean;
 }
 
-function buildBrowserlessEndpoint(token: string): string {
+function buildBrowserlessEndpoint(token: string, solveCaptchas: boolean): string {
   const endpoint = new URL("wss://production-ams.browserless.io/stealth");
   endpoint.searchParams.set("token", token);
-  endpoint.searchParams.set("solveCaptchas", "true");
+  endpoint.searchParams.set("solveCaptchas", String(solveCaptchas));
   return endpoint.toString();
 }
 
@@ -383,7 +384,10 @@ export class PlaywrightPortalBrowserSession implements PortalBrowserSession {
       }
 
       browser = await chromium.connectOverCDP(
-        buildBrowserlessEndpoint(this.options.browserlessToken),
+        buildBrowserlessEndpoint(
+          this.options.browserlessToken,
+          this.options.solveCaptchas ?? true,
+        ),
         { timeout: this.timeoutMs },
       );
       const context = browser.contexts()[0] ?? (await browser.newContext());

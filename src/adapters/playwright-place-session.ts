@@ -10,6 +10,7 @@ export interface PlaywrightPlaceSessionOptions {
   placePortalEmail: string;
   placePortalPassword: string;
   timeoutMs?: number;
+  solveCaptchas?: boolean;
 }
 
 export class PlaywrightPlaceBrowserSession implements PlaceBrowserSession {
@@ -25,6 +26,9 @@ export class PlaywrightPlaceBrowserSession implements PlaceBrowserSession {
       ...(options.timeoutMs === undefined
         ? {}
         : { timeoutMs: options.timeoutMs }),
+      ...(options.solveCaptchas === undefined
+        ? {}
+        : { solveCaptchas: options.solveCaptchas }),
     });
   }
 

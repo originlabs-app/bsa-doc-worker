@@ -126,6 +126,12 @@ function validateDiscovery(input: {
   const ephemeralIds = input.ephemeralAttachments.map(({ stableId }) => stableId);
   if (
     safeIds.length === 0 ||
+    safeIds.some(
+      (stableId) => !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(stableId),
+    ) ||
+    ephemeralIds.some(
+      (stableId) => !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(stableId),
+    ) ||
     safeIds.length !== new Set(safeIds).size ||
     ephemeralIds.length !== new Set(ephemeralIds).size ||
     safeIds.length !== ephemeralIds.length ||

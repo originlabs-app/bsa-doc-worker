@@ -149,6 +149,7 @@ function createDependencies(
         browserlessToken,
         placePortalEmail: config.placePortalEmail!,
         placePortalPassword: config.placePortalPassword!,
+        solveCaptchas: false,
       }),
     ),
     maximilien: new MaximilienAdapter(
@@ -156,6 +157,7 @@ function createDependencies(
         browserlessToken,
         maximilienPortalEmail: config.maximilienPortalEmail!,
         maximilienPortalPassword: config.maximilienPortalPassword!,
+        solveCaptchas: false,
       }),
     ),
   };

@@ -10,6 +10,7 @@ export interface PlaywrightMaximilienSessionOptions {
   maximilienPortalEmail: string;
   maximilienPortalPassword: string;
   timeoutMs?: number;
+  solveCaptchas?: boolean;
 }
 
 export class PlaywrightMaximilienBrowserSession
@@ -27,6 +28,9 @@ export class PlaywrightMaximilienBrowserSession
       ...(options.timeoutMs === undefined
         ? {}
         : { timeoutMs: options.timeoutMs }),
+      ...(options.solveCaptchas === undefined
+        ? {}
+        : { solveCaptchas: options.solveCaptchas }),
     });
   }
 

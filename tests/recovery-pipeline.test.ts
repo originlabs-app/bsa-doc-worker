@@ -162,4 +162,21 @@ describe("createRecoveryDocumentPipeline", () => {
       `${target.companyId}/${target.tenderId}/one.pdf`,
     ]);
   });
+
+  it("rejects a traversal-shaped manifest identity before opening quarantine", async () => {
+    const objectStorage = storage();
+    const unsafe = discovery();
+    unsafe.safeManifest.attachments[0]!.stableId = "../../escape";
+    unsafe.ephemeralAttachments[0]!.stableId = "../../escape";
+    const pipeline = createRecoveryDocumentPipeline({
+      storage: objectStorage,
+      fetcher: vi.fn(),
+      maxBytes: 1_000,
+    });
+
+    await expect(
+      pipeline.fetchAndUpload({ target, match, discovery: unsafe }),
+    ).rejects.toThrow("RECOVERY_MANIFEST_MISMATCH");
+    expect(objectStorage.upload).not.toHaveBeenCalled();
+  });
 });

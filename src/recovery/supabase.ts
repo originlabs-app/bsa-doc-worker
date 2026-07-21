@@ -19,11 +19,11 @@ export interface RecoverySupabaseClient {
 const CandidateRow = z.object({
   tender_id: z.string().min(1),
   company_id: z.string().min(1),
-  title: z.string().min(1),
-  buyer_name: z.string().default(""),
-  reference: z.string().default(""),
-  buyer_profile_link: z.string().url(),
-  lot_titles: z.array(z.string()).default([]),
+  title: z.string().min(1).max(500),
+  buyer_name: z.string().max(300).default(""),
+  reference: z.string().max(200).default(""),
+  buyer_profile_link: z.string().url().max(4_096),
+  lot_titles: z.array(z.string().max(300)).max(200).default([]),
 });
 
 const ReservationRow = z.object({
