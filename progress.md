@@ -539,3 +539,15 @@ Limites (à prouver au retour des crédits) : taux réel de sauvetage du
 texte normalisé sera souvent en désaccord — c'est la donnée qu'on veut),
 coût observé de l'audit ; spends d'échec total restent attribués au modèle
 titulaire (coût combiné, métadonnées non éclatées sur ce chemin).
+
+## 2026-07-22 — M3 parité allotissement découvert à la lecture (EN COURS)
+
+- Lane dédiée : worktree `../BSA_DCE_RECOVERY_WORKER-m3-discovered-lots`,
+  branche `fix/analyze-discovered-lots-m3`, base fraîche
+  `origin/main@678ee8e`.
+- Périmètre : promotion sûre `standalone + undetermined` vers `market` quand
+  le DCE établit au moins deux lots canoniques, rapprochement d'identité,
+  conflit avec `announced_lot_count` et rejeu `materialize -> sync`.
+- Interdits : aucun push, merge ou déploiement Railway ; aucun appel réel
+  Supabase/OpenRouter et aucune écriture de production.
+- Statut : `IN_PROGRESS` ; gates et commits `[skip ci]` à consigner au gel.

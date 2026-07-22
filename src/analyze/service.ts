@@ -14,6 +14,8 @@ import {
   type DeadlineGateStatus,
 } from "./domain.js";
 import { degradeUngroundedBusinessFields } from "./grounding.js";
+export { normalizeLotNumberValue } from "./lot-identity.js";
+import { normalizeLotNumberValue } from "./lot-identity.js";
 import type {
   FinalAnalysisUnit,
   FinalizedAnalysis,
@@ -112,20 +114,6 @@ function lotValues(unit: FinalAnalysisUnit): AnalysisLotValues | null {
     summary: unit.summary,
     businessFields: unit.businessFields ?? null,
   };
-}
-
-// Same lot-number normalization family as the edge (handler.ts
-// normalizeLotNumberValue): "Lot n°01a" → "1A".
-export function normalizeLotNumberValue(value: string | null): string | null {
-  if (value === null) return null;
-  const match = value.trim().match(
-    /^(?:lot\s*(?:n\s*[°ºo]?\s*)?)?0*([0-9]{1,3})([a-z]?)$/i,
-  );
-  if (!match) return null;
-  const parsed = Number(match[1]);
-  return Number.isInteger(parsed) && parsed > 0
-    ? `${parsed}${(match[2] ?? "").toUpperCase()}`
-    : null;
 }
 
 function normalizeForLotMatching(value: string | null): string {
