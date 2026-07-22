@@ -270,6 +270,41 @@ async function waitForOptionalNavigation(
   ]);
 }
 
+function awRejectedCaptcha(page: Page): boolean {
+  try {
+    const url = new URL(page.url());
+    for (const [key, value] of url.searchParams) {
+      if (
+        key.toLowerCase() === "typeerreur" &&
+        value.toLowerCase() === "captcha"
+      ) {
+        return true;
+      }
+    }
+  } catch {
+    // A malformed browser URL is handled by the next guarded flow step.
+  }
+  return false;
+}
+
+function throwIfAwRejectedCaptcha(
+  page: Page,
+  logger?: WorkerLogger,
+): void {
+  if (!awRejectedCaptcha(page)) return;
+  logger?.info("recovery_aw_captcha_rejected", {
+    portal: "aw_solutions",
+    wall: "aw_image_captcha",
+    detail: "aw_rejected_answer",
+  });
+  throw new AwAdapterError(
+    "CAPTCHA_UNSOLVED",
+    true,
+    "AW rejected the Browserless CAPTCHA answer",
+    { stage: "captcha", type: "captcha" },
+  );
+}
+
 interface AwCredentials {
   email: string;
   password: string;
@@ -478,6 +513,8 @@ export class PlaywrightAwBrowserSession implements AwBrowserSession {
           () => anonymousButton.click(),
           this.timeoutMs,
         );
+        step = "captcha";
+        throwIfAwRejectedCaptcha(page, this.options.logger);
       } else {
         step = "authenticate";
         await clickChoixDceIdentificationIfPrompted(page, this.timeoutMs);
