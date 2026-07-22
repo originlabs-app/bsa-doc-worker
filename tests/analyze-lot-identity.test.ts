@@ -35,10 +35,10 @@ function existing(
 
 describe("reconcileLotIdentities", () => {
   it("normalizes a reliable positive number before building the source key", () => {
-    const result = reconcileLotIdentities([lot("Lot n°01", "Gros œuvre")], []);
+    const result = reconcileLotIdentities([lot("Lot n°01a", "Gros œuvre")], []);
 
     expect(result.lots).toEqual([
-      expect.objectContaining({ number: "1", sourceLotKey: "number:1" }),
+      expect.objectContaining({ number: "1A", sourceLotKey: "number:1a" }),
     ]);
     expect(result.issues).toEqual([]);
   });
@@ -64,6 +64,18 @@ describe("reconcileLotIdentities", () => {
     ]);
   });
 
+  it("also rejects Lot 0 when it appears only in the title", () => {
+    const result = reconcileLotIdentities(
+      [lot("sans numéro", "Lot 0 - Terrassement")],
+      [],
+    );
+
+    expect(result.lots).toEqual([]);
+    expect(result.issues).toEqual([
+      expect.objectContaining({ code: "lot_zero_unresolved" }),
+    ]);
+  });
+
   it("builds stable title-and-order identities independently of model output order", () => {
     const forward = reconcileLotIdentities([
       lot("sans numéro", "Électricité"),
@@ -81,6 +93,10 @@ describe("reconcileLotIdentities", () => {
     expect(forward.lots.every((entry) =>
       entry.sourceLotKey?.startsWith("title:")
     )).toBe(true);
+    expect(forward.lots.map((entry) => entry.title)).toEqual([
+      "Électricité",
+      "Gros œuvre",
+    ]);
   });
 
   it("keeps one deterministic candidate when two raw numbers describe one identity", () => {

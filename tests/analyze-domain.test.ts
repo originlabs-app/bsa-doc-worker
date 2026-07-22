@@ -331,7 +331,7 @@ describe("shouldAutoMaterializeTenderLots", () => {
     lot_structure_locked_at: null,
   };
 
-  // Exact truth table of the edge guard, market branch.
+  // Exact truth table of the edge guard, including standalone discovery.
   const cases: Array<{
     label: string;
     tender: LotMaterializationTender;
@@ -359,7 +359,17 @@ describe("shouldAutoMaterializeTenderLots", () => {
       expected: false,
     },
     {
-      label: "standalone record (worker scope excludes the edge standalone branch)",
+      label: "eligible undetermined standalone discovered during DCE reading",
+      tender: {
+        ...eligible,
+        record_type: "standalone",
+        lot_structure_mode: "undetermined",
+        lot_structure_origin: null,
+      },
+      expected: true,
+    },
+    {
+      label: "standalone already declared multi",
       tender: { ...eligible, record_type: "standalone" },
       expected: false,
     },

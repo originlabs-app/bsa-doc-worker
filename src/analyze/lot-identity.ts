@@ -71,6 +71,11 @@ function containsExplicitZero(value: string | null): boolean {
   return /^(?:lot\s*(?:n\s*[°ºo]?\s*)?)?0+$/i.test(value.trim());
 }
 
+function containsTitleLotZero(value: string | null): boolean {
+  return value !== null &&
+    /\blot\s*(?:n\s*[°ºo]?\s*)?0+\b/i.test(value);
+}
+
 function normalizeTitle(value: string | null): string {
   return (value ?? "")
     .toLocaleLowerCase("fr")
@@ -105,7 +110,10 @@ function canonicalCandidates(
     const rawNumber = normalizeLotNumberValue(lot.number);
     const titleNumber = positiveLotNumberFromTitle(lot.title);
     const number = rawNumber ?? titleNumber;
-    if (!number && containsExplicitZero(lot.number)) {
+    if (
+      !number &&
+      (containsExplicitZero(lot.number) || containsTitleLotZero(lot.title))
+    ) {
       issues.push({
         code: "lot_zero_unresolved",
         candidateIndex,
@@ -121,25 +129,29 @@ function canonicalCandidates(
     }];
   });
 
-  const orderedFallbacks = preliminary
-    .filter((candidate) => candidate.number === null)
-    .sort((left, right) =>
-      left.titleIdentity.localeCompare(right.titleIdentity, "fr") ||
-      left.candidateIndex - right.candidateIndex
-    );
+  const ordered = [...preliminary].sort((left, right) => {
+    if (left.number !== null && right.number !== null) {
+      return left.number.localeCompare(right.number, "fr", { numeric: true }) ||
+        left.candidateIndex - right.candidateIndex;
+    }
+    if (left.number !== null) return -1;
+    if (right.number !== null) return 1;
+    return left.titleIdentity.localeCompare(right.titleIdentity, "fr") ||
+      left.candidateIndex - right.candidateIndex;
+  });
   const fallbackOrder = new Map(
-    orderedFallbacks.map((candidate, order) => [candidate.candidateIndex, order]),
+    ordered.map((candidate, order) => [candidate.candidateIndex, order]),
   );
 
   return {
-    candidates: preliminary.map((candidate) => {
+    candidates: ordered.map((candidate) => {
       if (candidate.number !== null) {
         const identity = `number:${candidate.number}`;
         return {
           ...candidate,
           order: candidate.candidateIndex,
           identity,
-          sourceLotKey: identity,
+          sourceLotKey: identity.toLocaleLowerCase("fr"),
         };
       }
       const order = fallbackOrder.get(candidate.candidateIndex) ?? 0;

@@ -5,6 +5,7 @@ import type {
   AnalyzeLearningSnapshot,
 } from "./agent-types.js";
 import type { AnalyzeConfig } from "./config.js";
+import type { ExistingLotIdentity } from "./lot-identity.js";
 import {
   runAnalyzeService,
   type AnalysisResultSink,
@@ -39,6 +40,12 @@ export interface AnalyzeDossierAssembly {
    * materialize (the RPC would flip the missing lots to review_required).
    */
   existingLotCount: number;
+  /** Live child identities used before creation; source_lot_key alone is not
+   * sufficient to prevent two rows for the same logical lot. */
+  existingLots: ExistingLotIdentity[];
+  /** Immutable Nukema declaration captured by M1. */
+  announcedLotCount: number | null;
+  lotDeclarationState: string | null;
   existingScore: number | null;
   deadlineDate: string | null;
   dossier: AnalyzeDossierInput;
@@ -286,7 +293,10 @@ export async function runAnalyzeOneShot(
         lot: assembly.lot,
         // LOT H: DB lot children count feeds the expected roster size that
         // decides the chunked path on large allotted mothers.
-        expectedLotCount: assembly.existingLotCount,
+        expectedLotCount: Math.max(
+          assembly.existingLotCount,
+          assembly.announcedLotCount ?? 0,
+        ),
         client: dependencies.client,
         recallLearning: () => dependencies.recallLearning(assembly),
         ...(sink ? { sink } : {}),
