@@ -76,6 +76,15 @@ describe("reconcileLotIdentities", () => {
     ]);
   });
 
+  it("rejects an unnumbered candidate without a usable title identity", () => {
+    const result = reconcileLotIdentities([lot(null, "   ")], []);
+
+    expect(result.lots).toEqual([]);
+    expect(result.issues).toEqual([
+      expect.objectContaining({ code: "lot_identity_missing_title" }),
+    ]);
+  });
+
   it("builds stable title-and-order identities independently of model output order", () => {
     const forward = reconcileLotIdentities([
       lot("sans numéro", "Électricité"),
@@ -151,6 +160,18 @@ describe("reconcileLotIdentities", () => {
     expect(result.lots).toEqual([]);
     expect(result.issues).toEqual([
       expect.objectContaining({ code: "existing_identity_missing_source_key" }),
+    ]);
+  });
+
+  it("does not create beside an unnumbered DB child whose identity order is missing", () => {
+    const result = reconcileLotIdentities(
+      [lot("sans numéro", "Gros œuvre")],
+      [existing({ number: null, title: "Gros œuvre", order: null })],
+    );
+
+    expect(result.lots).toEqual([]);
+    expect(result.issues).toEqual([
+      expect.objectContaining({ code: "existing_identity_missing_order" }),
     ]);
   });
 });

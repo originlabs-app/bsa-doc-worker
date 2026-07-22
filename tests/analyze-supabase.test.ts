@@ -49,8 +49,39 @@ function queryResult(
     lte: (...args: unknown[]) => chain("lte", args),
     order: (...args: unknown[]) => chain("order", args),
     limit: (...args: unknown[]) => chain("limit", args),
-    eq: (...args: unknown[]) => chain("eq", args),
-    is: (...args: unknown[]) => chain("is", args),
+    eq: (...args: unknown[]) => {
+      const [column, value] = args as [string, unknown];
+      if (Array.isArray(current.data)) {
+        current = {
+          ...current,
+          data: current.data.filter((row) => valueAtPath(row, column) === value),
+        };
+      }
+      return chain("eq", args);
+    },
+    is: (...args: unknown[]) => {
+      const [column, value] = args as [string, unknown];
+      if (Array.isArray(current.data)) {
+        current = {
+          ...current,
+          data: current.data.filter((row) => valueAtPath(row, column) === value),
+        };
+      }
+      return chain("is", args);
+    },
+    lt: (...args: unknown[]) => {
+      const [column, value] = args as [string, number];
+      if (Array.isArray(current.data)) {
+        current = {
+          ...current,
+          data: current.data.filter((row) => {
+            const field = valueAtPath(row, column);
+            return typeof field === "number" && field < value;
+          }),
+        };
+      }
+      return chain("lt", args);
+    },
     not: (...args: unknown[]) => chain("not", args),
     filter: (...args: unknown[]) => chain("filter", args),
     update: (...args: unknown[]) => chain("update", args),
@@ -268,6 +299,9 @@ describe("Supabase ANALYZE read adapter", () => {
       documents: [document],
       tenderLots: [{
         id: "lot-existing-1",
+        parent_tender_id: "tender-1",
+        record_type: "lot",
+        deleted_at: null,
         source_lot_key: "metadata:lot-1",
         lot_number: "1",
         lot_title: "Gros œuvre",
@@ -378,6 +412,51 @@ describe("Supabase ANALYZE read adapter", () => {
         { method: "in", args: ["tender.record_type", ["standalone"]] },
       ]),
     );
+  });
+
+  it("reselects only a failed sync after a standalone was promoted to market", async () => {
+    const fixture = fixtureClient({
+      queue: [
+        {
+          id: "queue-replay",
+          tender_id: "tender-promoted",
+          attempts: 1,
+          status: "failed",
+          last_error: "ANALYZE_LOT_SYNC_FAILED",
+          tender: {
+            record_type: "market",
+            source: "Nukema API",
+            lot_structure_mode: "multi",
+            lot_structure_origin: "nukema_bot",
+            lot_structure_locked_at: null,
+          },
+        },
+        {
+          id: "queue-ordinary-market",
+          tender_id: "tender-ordinary",
+          attempts: 0,
+          status: "pending",
+          last_error: null,
+          tender: {
+            record_type: "market",
+            source: "Nukema API",
+            lot_structure_mode: "multi",
+            lot_structure_origin: "nukema_bot",
+            lot_structure_locked_at: null,
+          },
+        },
+      ],
+    });
+    const store = createSupabaseAnalyzeStore(fixture.client);
+
+    await expect(store.peekCandidates(
+      10,
+      "2026-07-21T08:00:00.000Z",
+    )).resolves.toEqual([{
+      queueId: "queue-replay",
+      tenderId: "tender-promoted",
+      attempts: 1,
+    }]);
   });
 
   it("widens the candidate perimeter to the configured record types", async () => {
@@ -1340,6 +1419,9 @@ describe("Supabase ANALYZE lot materialization (LOT C)", () => {
           updated: 2,
           preserved: 0,
           review_required: 0,
+          accepted_count: 2,
+          rejected_count: 0,
+          rejected: [],
         },
       },
     });
@@ -2052,6 +2134,9 @@ describe("Supabase ANALYZE hardening (LOT D)", () => {
         tenderLots: [
           {
             id: "lot-a",
+            parent_tender_id: "tender-1",
+            record_type: "lot",
+            deleted_at: null,
             source_lot_key: "number:1",
             lot_number: "1",
             lot_title: "Lot 1",
@@ -2059,6 +2144,9 @@ describe("Supabase ANALYZE hardening (LOT D)", () => {
           },
           {
             id: "lot-b",
+            parent_tender_id: "tender-1",
+            record_type: "lot",
+            deleted_at: null,
             source_lot_key: "number:2",
             lot_number: "2",
             lot_title: "Lot 2",

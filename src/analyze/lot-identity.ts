@@ -7,14 +7,16 @@ export interface ExistingLotIdentity {
   sourceLotKey: string | null;
   number: string | null;
   title: string | null;
-  order: number;
+  order: number | null;
 }
 
 export type LotIdentityIssueCode =
   | "lot_zero_unresolved"
+  | "lot_identity_missing_title"
   | "duplicate_candidate_identity"
   | "ambiguous_existing_identity"
-  | "existing_identity_missing_source_key";
+  | "existing_identity_missing_source_key"
+  | "existing_identity_missing_order";
 
 export interface LotIdentityIssue {
   code: LotIdentityIssueCode;
@@ -68,12 +70,12 @@ function positiveLotNumberFromTitle(title: string | null): string | null {
 
 function containsExplicitZero(value: string | null): boolean {
   if (!value) return false;
-  return /^(?:lot\s*(?:n\s*[°ºo]?\s*)?)?0+$/i.test(value.trim());
+  return /^(?:lot\s*(?:n\s*[°ºo]?\s*)?)?0+[a-z]?$/i.test(value.trim());
 }
 
 function containsTitleLotZero(value: string | null): boolean {
   return value !== null &&
-    /\blot\s*(?:n\s*[°ºo]?\s*)?0+\b/i.test(value);
+    /\blot\s*(?:n\s*[°ºo]?\s*)?0+[a-z]?\b/i.test(value);
 }
 
 function normalizeTitle(value: string | null): string {
@@ -95,10 +97,11 @@ function titleSourceKey(titleIdentity: string, order: number): string {
   return `title:${digest}:order:${order}`;
 }
 
-function existingIdentity(existing: ExistingLotIdentity): string {
+function existingIdentity(existing: ExistingLotIdentity): string | null {
   const number = normalizeLotNumberValue(existing.number) ??
     positiveLotNumberFromTitle(existing.title);
   if (number) return `number:${number}`;
+  if (existing.order === null) return null;
   return `title:${normalizeTitle(existing.title)}:order:${existing.order}`;
 }
 
@@ -110,6 +113,7 @@ function canonicalCandidates(
     const rawNumber = normalizeLotNumberValue(lot.number);
     const titleNumber = positiveLotNumberFromTitle(lot.title);
     const number = rawNumber ?? titleNumber;
+    const titleIdentity = normalizeTitle(lot.title);
     if (
       !number &&
       (containsExplicitZero(lot.number) || containsTitleLotZero(lot.title))
@@ -121,11 +125,19 @@ function canonicalCandidates(
       });
       return [];
     }
+    if (!number && !titleIdentity) {
+      issues.push({
+        code: "lot_identity_missing_title",
+        candidateIndex,
+        identity: "missing",
+      });
+      return [];
+    }
     return [{
       candidateIndex,
       lot,
       number,
-      titleIdentity: normalizeTitle(lot.title),
+      titleIdentity,
     }];
   });
 
@@ -194,14 +206,36 @@ export function reconcileLotIdentities(
   }
 
   const existingByIdentity = new Map<string, ExistingLotIdentity[]>();
+  const unorderedExistingByTitle = new Map<string, ExistingLotIdentity[]>();
   for (const existing of existingLots) {
     const identity = existingIdentity(existing);
+    if (identity === null) {
+      const titleIdentity = normalizeTitle(existing.title);
+      if (titleIdentity) {
+        const matches = unorderedExistingByTitle.get(titleIdentity) ?? [];
+        matches.push(existing);
+        unorderedExistingByTitle.set(titleIdentity, matches);
+      }
+      continue;
+    }
     const matches = existingByIdentity.get(identity) ?? [];
     matches.push(existing);
     existingByIdentity.set(identity, matches);
   }
 
   const reconciled = uniqueCandidates.flatMap((candidate) => {
+    const unorderedMatches = candidate.number === null
+      ? unorderedExistingByTitle.get(candidate.titleIdentity) ?? []
+      : [];
+    if (unorderedMatches.length > 0) {
+      issues.push({
+        code: "existing_identity_missing_order",
+        candidateIndex: candidate.candidateIndex,
+        identity: candidate.identity,
+        existingLotIds: unorderedMatches.map((match) => match.id),
+      });
+      return [];
+    }
     const matches = existingByIdentity.get(candidate.identity) ?? [];
     if (matches.length > 1) {
       issues.push({
