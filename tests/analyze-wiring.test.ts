@@ -22,6 +22,9 @@ const assembly: AnalyzeDossierAssembly = {
   lot: null,
   autoMaterializeLots: false,
   existingLotCount: 0,
+  existingLots: [],
+  announcedLotCount: null,
+  lotDeclarationState: null,
   existingScore: 72,
   deadlineDate: null,
   coverage: {

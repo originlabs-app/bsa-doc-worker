@@ -14,16 +14,20 @@ import {
 import type { AnalyzeDocumentInput } from "./agent-types.js";
 import { groundBusinessField } from "./grounding.js";
 import {
+  reconcileLotIdentities,
   normalizeLotNumberValue,
-  type AnalysisWritePayload,
-} from "./service.js";
+  type ExistingLotIdentity,
+  type LotIdentityIssue,
+} from "./lot-identity.js";
+import type { AnalysisWritePayload } from "./service.js";
 import type { LotBusinessFields } from "./types.js";
-import type {
-  AnalyzeApplyStore,
-  AnalyzeAssemblyReport,
-  AnalyzeDossierAssembly,
-  AnalyzeQueueCandidate,
-  AnalyzeReadStore,
+import {
+  ANALYZE_MAX_ATTEMPTS,
+  type AnalyzeApplyStore,
+  type AnalyzeAssemblyReport,
+  type AnalyzeDossierAssembly,
+  type AnalyzeQueueCandidate,
+  type AnalyzeReadStore,
 } from "./wiring.js";
 
 const STORAGE_BUCKET = "appel-offre-documents";
@@ -91,6 +95,16 @@ const TenderRowSchema = z.object({
   lot_structure_mode: z.string().nullable(),
   lot_structure_origin: z.string().nullable(),
   lot_structure_locked_at: z.string().nullable(),
+  announced_lot_count: z.number().int().min(0).nullable(),
+  lot_declaration_state: z.string().nullable(),
+}).passthrough();
+
+const ExistingLotRowSchema = z.object({
+  id: z.string().min(1),
+  source_lot_key: z.string().nullable(),
+  lot_number: z.string().nullable(),
+  lot_title: z.string().nullable(),
+  lot_order: z.number().int().min(0).nullable(),
 }).passthrough();
 
 const NullableStringArray = z.array(z.string()).nullable();
@@ -201,11 +215,85 @@ async function listQualifications(
   return Array.isArray(data) ? data : [];
 }
 
+const PROMOTED_RETRY_ERRORS = [
+  "ANALYZE_LOT_MATERIALIZE_FAILED",
+  "ANALYZE_LOT_MATERIALIZE_INVALID_RESPONSE",
+  "ANALYZE_LOT_MATERIALIZE_PARTIAL",
+  "ANALYZE_LOT_CONFLICT_STATE_WRITE_FAILED",
+  "ANALYZE_LOT_SYNC_FAILED",
+  "ANALYZE_LOT_SYNC_INVALID_RESPONSE",
+  "ANALYZE_LOT_SYNC_UNMATCHED",
+  "ANALYZE_LEDGER_WRITE_FAILED",
+];
+
+// Replay invariant: materialize can commit the standalone -> market promotion
+// before a later write fails. The default standalone perimeter would then lose
+// that failed queue row forever, so this narrow lane only reselects failures
+// that can occur at/after materialization on an unlocked Nukema bot market.
+async function listPromotedRetries(
+  client: AnalyzeSupabaseClient,
+  limit: number,
+  observedAt: string,
+): Promise<unknown[]> {
+  const result = await (client.from("dce_analysis_queue") as {
+    select(columns: string): {
+      eq(column: string, value: string): {
+        lt(column: string, value: number): {
+          in(column: string, values: string[]): {
+            eq(column: string, value: string): {
+              eq(column: string, value: string): {
+                eq(column: string, value: string): {
+                  eq(column: string, value: string): {
+                    is(column: string, value: null): {
+                      lte(column: string, value: string): {
+                        order(column: string, options: { ascending: boolean }): {
+                          order(
+                            column: string,
+                            options: { ascending: boolean },
+                          ): {
+                            order(
+                              column: string,
+                              options: { ascending: boolean },
+                            ): {
+                              limit(value: number): Promise<SupabaseResult>;
+                            };
+                          };
+                        };
+                      };
+                    };
+                  };
+                };
+              };
+            };
+          };
+        };
+      };
+    };
+  }).select(
+    "id,tender_id,attempts,tender!tender_id!inner(record_type,source,lot_structure_mode,lot_structure_origin,lot_structure_locked_at)",
+  )
+    .eq("status", "failed")
+    .lt("attempts", ANALYZE_MAX_ATTEMPTS)
+    .in("last_error", PROMOTED_RETRY_ERRORS)
+    .eq("tender.record_type", "market")
+    .eq("tender.source", "Nukema API")
+    .eq("tender.lot_structure_mode", "multi")
+    .eq("tender.lot_structure_origin", "nukema_bot")
+    .is("tender.lot_structure_locked_at", null)
+    .lte("created_at", observedAt)
+    .order("queue_order_at", { ascending: true })
+    .order("created_at", { ascending: true })
+    .order("id", { ascending: true })
+    .limit(limit);
+  const data = checked(result, "ANALYZE_PROMOTED_RETRY_READ_FAILED");
+  return Array.isArray(data) ? data : [];
+}
+
 // LOT D roster source: live lot children already materialized in the DB.
-async function countExistingLots(
+async function listExistingLots(
   client: AnalyzeSupabaseClient,
   parentTenderId: string,
-): Promise<number> {
+): Promise<ExistingLotIdentity[]> {
   const result = await (client.from("tender") as {
     select(columns: string): {
       eq(column: string, value: string): {
@@ -214,12 +302,20 @@ async function countExistingLots(
         };
       };
     };
-  }).select("id")
+  }).select("id,source_lot_key,lot_number,lot_title,lot_order")
     .eq("parent_tender_id", parentTenderId)
     .eq("record_type", "lot")
     .is("deleted_at", null);
   const data = checked(result, "ANALYZE_EXISTING_LOTS_READ_FAILED");
-  return Array.isArray(data) ? data.length : 0;
+  return z.array(ExistingLotRowSchema)
+    .parse(Array.isArray(data) ? data : [])
+    .map((row) => ({
+      id: row.id,
+      sourceLotKey: nonBlank(row.source_lot_key),
+      number: nonBlank(row.lot_number),
+      title: nonBlank(row.lot_title),
+      order: row.lot_order,
+    }));
 }
 
 async function listDocuments(
@@ -240,7 +336,7 @@ async function assembleCandidate(
   const rawTender = await singleRow(
     client,
     "tender",
-    "id,company_id,title,buyer_name,summary_description,contract_subject,project_location,city,department_code,estimated_value,procedure_type,deadline_date,submission_date,relevance_score,deleted_at,status,record_type,parent_tender_id,lot_number,lot_title,source_lot_key,lot_analysis_state,source,lot_structure_mode,lot_structure_origin,lot_structure_locked_at",
+    "id,company_id,title,buyer_name,summary_description,contract_subject,project_location,city,department_code,estimated_value,procedure_type,deadline_date,submission_date,relevance_score,deleted_at,status,record_type,parent_tender_id,lot_number,lot_title,source_lot_key,lot_analysis_state,source,lot_structure_mode,lot_structure_origin,lot_structure_locked_at,announced_lot_count,lot_declaration_state",
     candidate.tenderId,
   );
   if (!rawTender) return { status: "skipped", reason: "tender_missing" };
@@ -345,9 +441,9 @@ async function assembleCandidate(
   // The roster gate only matters when a materialization can happen: the
   // children count is read exactly then, at assembly time (the RPC re-checks
   // its own guards server-side anyway).
-  const existingLotCount = autoMaterializeLots
-    ? await countExistingLots(client, candidate.tenderId)
-    : 0;
+  const existingLots = autoMaterializeLots
+    ? await listExistingLots(client, candidate.tenderId)
+    : [];
 
   return {
     status: "ready",
@@ -357,7 +453,10 @@ async function assembleCandidate(
       recordType: tender.record_type,
       lot: lotContext,
       autoMaterializeLots,
-      existingLotCount,
+      existingLotCount: existingLots.length,
+      existingLots,
+      announcedLotCount: tender.announced_lot_count,
+      lotDeclarationState: tender.lot_declaration_state,
       existingScore: finiteNumber(tender.relevance_score),
       // Same coalesce order as the edge toScoringTender (scorer.ts:166-168).
       deadlineDate: nonBlank(tender.deadline_date) ??
@@ -558,6 +657,13 @@ const MaterializeLotsResultSchema = z.object({
   updated: z.number().int().min(0),
   preserved: z.number().int().min(0),
   review_required: z.number().int().min(0),
+  accepted_count: z.number().int().min(0),
+  rejected_count: z.number().int().min(0),
+  rejected: z.array(z.object({
+    index: z.number().int().min(0).nullable().optional(),
+    source_lot_key: z.string().nullable().optional(),
+    reason: z.string().min(1),
+  }).passthrough()),
 }).passthrough();
 
 const SyncLotAnalysisResultSchema = z.object({
@@ -655,12 +761,93 @@ function isLotMaterializationGuardError(error: unknown): boolean {
   return LOT_MATERIALIZATION_GUARD_CODES.some((code) => message.includes(code));
 }
 
+interface GuardedTenderUpdateQuery {
+  eq(column: string, value: string): GuardedTenderUpdateQuery;
+  is(column: string, value: null): GuardedTenderUpdateQuery;
+  select(columns: string): {
+    maybeSingle(): Promise<SupabaseResult>;
+  };
+}
+
+async function markLotDeclarationConflict(
+  client: AnalyzeSupabaseClient,
+  tenderId: string,
+  expected: {
+    recordType: "standalone" | "market";
+    structureMode: "undetermined" | "multi";
+    structureOrigin?: "nukema_bot";
+  },
+): Promise<boolean> {
+  // This compensation repeats every edge guard against the current parent;
+  // a qualification, manual structure or human lock between reads always wins.
+  let query = (client.from("tender") as {
+    update(values: Record<string, unknown>): GuardedTenderUpdateQuery;
+  }).update({ lot_declaration_state: "conflict_review" })
+    .eq("id", tenderId)
+    .eq("source", "Nukema API")
+    .eq("status", "opportunity")
+    .eq("record_type", expected.recordType)
+    .eq("lot_structure_mode", expected.structureMode);
+  if (expected.structureOrigin) {
+    query = query.eq("lot_structure_origin", expected.structureOrigin);
+  }
+  const result = await query
+    .is("lot_structure_locked_at", null)
+    .select("id")
+    .maybeSingle();
+  return Boolean(checked(result, "ANALYZE_LOT_CONFLICT_STATE_WRITE_FAILED"));
+}
+
 async function writeAnalysis(
   client: AnalyzeSupabaseClient,
   assembly: AnalyzeDossierAssembly,
   payload: AnalysisWritePayload,
   logger?: WorkerLogger,
 ): Promise<void> {
+  const shouldReconcileMotherLots = assembly.lot === null &&
+    (assembly.recordType === "market" || assembly.autoMaterializeLots);
+  const identity = shouldReconcileMotherLots
+    ? reconcileLotIdentities(payload.lots, assembly.existingLots)
+    : { lots: payload.lots, issues: [] as LotIdentityIssue[] };
+  const effectivePayload: AnalysisWritePayload = {
+    ...payload,
+    lots: identity.lots,
+  };
+  const discoveredLotCount = effectivePayload.lots.length;
+  const isStandalonePromotion = assembly.recordType === "standalone" &&
+    assembly.lot === null &&
+    assembly.autoMaterializeLots &&
+    discoveredLotCount >= 2;
+  const announcedLotCount = assembly.announcedLotCount;
+  const lotCountDelta = announcedLotCount === null
+    ? null
+    : discoveredLotCount - announcedLotCount;
+  const lotCountConflict = assembly.autoMaterializeLots &&
+    announcedLotCount !== null &&
+    lotCountDelta !== 0;
+  const identityConflict = assembly.autoMaterializeLots &&
+    identity.issues.length > 0;
+  const preserveExistingConflict = assembly.autoMaterializeLots &&
+    assembly.lotDeclarationState === "conflict_review";
+  const declarationConflict = lotCountConflict || identityConflict ||
+    preserveExistingConflict;
+
+  if (lotCountConflict) {
+    logger?.info("analyze_lot_count_conflict", {
+      tender_id: payload.tenderId,
+      announced: announcedLotCount,
+      discovered: discoveredLotCount,
+      delta: lotCountDelta,
+    });
+  }
+  if (identityConflict) {
+    logger?.info("analyze_lot_identity_conflict", {
+      tender_id: payload.tenderId,
+      issues: identity.issues.map((issue) => issue.code),
+      rejected_candidates: identity.issues.length,
+    });
+  }
+
   // LOT E — FIRST control, before the guarded tender UPDATE: a market
   // analysis whose lots are all unscored writes nothing (no tender update,
   // no materialize, no sync, no ledger); the queue row goes failed instead.
@@ -669,15 +856,15 @@ async function writeAnalysis(
   if (
     assembly.recordType === "market" &&
     assembly.lot === null &&
-    payload.lots.length > 0 &&
-    payload.lots.every((lot) => lot.relevanceScore === null)
+    effectivePayload.lots.length > 0 &&
+    effectivePayload.lots.every((lot) => lot.relevanceScore === null)
   ) {
     logger?.info("analyze_market_zero_lot_scores", {
       tender_id: payload.tenderId,
-      lots_total: payload.lots.length,
+      lots_total: effectivePayload.lots.length,
       lots_scored: 0,
     });
-    throw new AnalyzeMarketZeroLotScoresError(payload.lots.length);
+    throw new AnalyzeMarketZeroLotScoresError(effectivePayload.lots.length);
   }
   const guardedUpdate = await (client.from("tender") as {
     update(values: Record<string, unknown>): {
@@ -714,12 +901,34 @@ async function writeAnalysis(
   const updated = checked(guardedUpdate, "ANALYZE_TENDER_WRITE_FAILED");
   if (!updated) throw new Error("ANALYZE_TENDER_WRITE_GUARD");
 
+  if (
+    assembly.recordType === "standalone" &&
+    !isStandalonePromotion &&
+    declarationConflict
+  ) {
+    const conflictWritten = await markLotDeclarationConflict(
+      client,
+      payload.tenderId,
+      { recordType: "standalone", structureMode: "undetermined" },
+    );
+    logger?.info(
+      conflictWritten
+        ? "analyze_lot_conflict_state_written"
+        : "analyze_lot_conflict_state_skipped",
+      { tender_id: payload.tenderId },
+    );
+  }
+
   const analysisState = assembly.coverage.complete
     ? "documentary_complete"
     : "documentary_partial";
   if (
-    (assembly.recordType === "market" || assembly.lot !== null) &&
-    payload.lots.length > 0
+    (
+      assembly.recordType === "market" ||
+      assembly.lot !== null ||
+      isStandalonePromotion
+    ) &&
+    effectivePayload.lots.length > 0
   ) {
     const businessContext: BusinessFieldContext = {
       documents: assembly.dossier.documents,
@@ -730,20 +939,41 @@ async function writeAnalysis(
         }
         : {}),
     };
-    const lotsRpcPayload = payload.lots.map((lot, order) =>
+    const lotsRpcPayload = effectivePayload.lots.map((lot, order) =>
       lotRpcCandidate(lot, order, businessContext)
     );
+    const identityIssueCodes = [...new Set(
+      identity.issues.map((issue) => issue.code),
+    )];
     const runEvidence = {
       queue_id: assembly.queue.queueId,
       coverage_complete: assembly.coverage.complete,
       documents_count: assembly.coverage.documentsCount,
       omitted_documents: assembly.coverage.omittedDocuments,
+      announced_lot_count: announcedLotCount,
+      discovered_lot_count: discoveredLotCount,
+      lot_count_delta: lotCountDelta,
+      identity_issues: identityIssueCodes,
+      previous_lot_declaration_state: assembly.lotDeclarationState,
+      ...(discoveredLotCount >= 2
+        ? {
+          declaration_resolution: "confirmed_multi",
+          declaration_reliable: true,
+          declaration_reason: "worker_documentary_candidates",
+          dce_confirmed_lot_count: discoveredLotCount,
+        }
+        : {}),
     };
     // Materialize the missing lot rows only for an eligible market mother —
     // never for a direct lot (its rows already exist under the parent) — and
     // only when the produced roster is proven exhaustive (LOT D).
-    if (assembly.lot === null && assembly.autoMaterializeLots) {
-      const roster = lotRosterVerdict(assembly, payload);
+    let maySyncStandalonePromotion = false;
+    if (
+      assembly.lot === null &&
+      assembly.autoMaterializeLots &&
+      (assembly.recordType === "market" || isStandalonePromotion)
+    ) {
+      const roster = lotRosterVerdict(assembly, effectivePayload);
       if (!roster.materialize) {
         // Unproven roster: never rewrite the lot structure, sync alone.
         logger?.info(roster.event, {
@@ -755,7 +985,7 @@ async function writeAnalysis(
           p_parent_tender_id: payload.tenderId,
           p_analysis_state: analysisState,
           p_extraction_source: "dce",
-          p_extractor_version: "analyze-dce-lots-v1",
+          p_extractor_version: "analyze-dce-lots-v2",
           p_input_hash: hashLotRpcPayload(lotsRpcPayload),
           p_lots: lotsRpcPayload,
           p_run_evidence: runEvidence,
@@ -767,7 +997,8 @@ async function writeAnalysis(
               "ANALYZE_LOT_MATERIALIZE_FAILED",
             );
           }
-          // Edge parity: the human structure now wins; keep the sync alone.
+          // Edge parity: the human structure now wins. An existing market can
+          // still sync; a standalone never syncs rows that were not created.
           logger?.info("analyze_lot_materialization_skipped", {
             tender_id: payload.tenderId,
             error: errorMessageOf(materialized.error),
@@ -779,39 +1010,86 @@ async function writeAnalysis(
           if (!materializedReport.success) {
             throw new Error("ANALYZE_LOT_MATERIALIZE_INVALID_RESPONSE");
           }
-          logger?.info("analyze_lot_materialized", {
-            tender_id: payload.tenderId,
-            run_id: materializedReport.data.run_id,
-            created: materializedReport.data.created,
-            updated: materializedReport.data.updated,
-            preserved: materializedReport.data.preserved,
-            review_required: materializedReport.data.review_required,
-          });
+          const acceptedCount = materializedReport.data.accepted_count;
+          const rejected = materializedReport.data.rejected;
+          const materializationBlocked = acceptedCount === 0 &&
+            rejected.length > 0 &&
+            rejected.every((entry) => entry.reason === "materialization_blocked");
+          if (materializationBlocked) {
+            logger?.info("analyze_lot_materialization_skipped", {
+              tender_id: payload.tenderId,
+              error: "lot_structure_contains_human_decisions",
+              rejected_count: rejected.length,
+            });
+          } else if (
+            acceptedCount !== lotsRpcPayload.length ||
+            materializedReport.data.rejected_count > 0 ||
+            rejected.length > 0
+          ) {
+            logger?.info("analyze_lot_materialization_rejected", {
+              tender_id: payload.tenderId,
+              accepted_count: acceptedCount,
+              rejected_count: materializedReport.data.rejected_count,
+              reasons: rejected.map((entry) => entry.reason),
+            });
+            throw new Error("ANALYZE_LOT_MATERIALIZE_PARTIAL");
+          } else {
+            logger?.info("analyze_lot_materialized", {
+              tender_id: payload.tenderId,
+              run_id: materializedReport.data.run_id,
+              created: materializedReport.data.created,
+              updated: materializedReport.data.updated,
+              preserved: materializedReport.data.preserved,
+              review_required: materializedReport.data.review_required,
+            });
+            maySyncStandalonePromotion = true;
+            if (declarationConflict) {
+              const conflictWritten = await markLotDeclarationConflict(
+                client,
+                payload.tenderId,
+                {
+                  recordType: "market",
+                  structureMode: "multi",
+                  structureOrigin: "nukema_bot",
+                },
+              );
+              logger?.info(
+                conflictWritten
+                  ? "analyze_lot_conflict_state_written"
+                  : "analyze_lot_conflict_state_skipped",
+                { tender_id: payload.tenderId },
+              );
+            }
+          }
         }
       }
     }
-    const result = await client.rpc("sync_tender_lot_analysis", {
-      // Direct lot: the RPC is addressed to the MARKET PARENT, which locks the
-      // parent row and matches this single lot by source_lot_key/number. One
-      // payload entry = one lot touched; the sibling lots stay untouched.
-      p_parent_tender_id: assembly.lot
-        ? assembly.lot.parentTenderId
-        : payload.tenderId,
-      p_analysis_state: analysisState,
-      p_lots: lotsRpcPayload,
-      p_run_evidence: runEvidence,
-    });
-    checked(result, "ANALYZE_LOT_SYNC_FAILED");
-    const syncReport = SyncLotAnalysisResultSchema.safeParse(result.data);
-    if (!syncReport.success) {
-      throw new Error("ANALYZE_LOT_SYNC_INVALID_RESPONSE");
-    }
-    if (syncReport.data.matched === 0 || syncReport.data.unmatched > 0) {
-      throw new AnalyzeLotSyncUnmatchedError(
-        syncReport.data.matched,
-        syncReport.data.unmatched,
-        syncReport.data.locked,
-      );
+    const shouldSync = assembly.lot !== null ||
+      assembly.recordType === "market" ||
+      maySyncStandalonePromotion;
+    if (shouldSync) {
+      const result = await client.rpc("sync_tender_lot_analysis", {
+        // Direct lot: the RPC is addressed to the MARKET PARENT, which locks
+        // the parent row and matches this single lot. Siblings stay untouched.
+        p_parent_tender_id: assembly.lot
+          ? assembly.lot.parentTenderId
+          : payload.tenderId,
+        p_analysis_state: analysisState,
+        p_lots: lotsRpcPayload,
+        p_run_evidence: runEvidence,
+      });
+      checked(result, "ANALYZE_LOT_SYNC_FAILED");
+      const syncReport = SyncLotAnalysisResultSchema.safeParse(result.data);
+      if (!syncReport.success) {
+        throw new Error("ANALYZE_LOT_SYNC_INVALID_RESPONSE");
+      }
+      if (syncReport.data.matched === 0 || syncReport.data.unmatched > 0) {
+        throw new AnalyzeLotSyncUnmatchedError(
+          syncReport.data.matched,
+          syncReport.data.unmatched,
+          syncReport.data.locked,
+        );
+      }
     }
   }
 
@@ -869,7 +1147,16 @@ export function createSupabaseAnalyzeStore(
         .limit(limit);
       const data = checked(result, "ANALYZE_QUEUE_READ_FAILED");
       const rows = z.array(QueueRowSchema).parse(Array.isArray(data) ? data : []);
-      return rows.map((row) => ({
+      const promotedRetries = recordTypes.includes("standalone") &&
+          !recordTypes.includes("market")
+        ? z.array(QueueRowSchema).parse(
+          await listPromotedRetries(client, limit, observedAt),
+        )
+        : [];
+      const uniqueRows = new Map(
+        [...promotedRetries, ...rows].map((row) => [row.id, row]),
+      );
+      return [...uniqueRows.values()].slice(0, limit).map((row) => ({
         queueId: row.id,
         tenderId: row.tender_id,
         attempts: row.attempts,

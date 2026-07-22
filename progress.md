@@ -539,3 +539,40 @@ Limites (à prouver au retour des crédits) : taux réel de sauvetage du
 texte normalisé sera souvent en désaccord — c'est la donnée qu'on veut),
 coût observé de l'audit ; spends d'échec total restent attribués au modèle
 titulaire (coût combiné, métadonnées non éclatées sur ce chemin).
+
+## 2026-07-22 — M3 parité allotissement découvert à la lecture (GELÉ LOCAL)
+
+- Lane dédiée : worktree `../BSA_DCE_RECOVERY_WORKER-m3-discovered-lots`,
+  branche `fix/analyze-discovered-lots-m3`, base fraîche
+  `origin/main@678ee8e`.
+- Périmètre : promotion sûre `standalone + undetermined` vers `market` quand
+  le DCE établit au moins deux lots canoniques, rapprochement d'identité,
+  conflit avec `announced_lot_count` et rejeu `materialize -> sync`.
+- Interdits : aucun push, merge ou déploiement Railway ; aucun appel réel
+  Supabase/OpenRouter et aucune écriture de production.
+- Livré localement : garde edge complète `Nukema API + opportunity +
+  unlocked`, promotion du standalone `undetermined` seulement à partir de 2
+  identités documentaires canoniques, puis `materialize(dce) -> sync`.
+- M1 consommé : lecture immuable de `announced_lot_count` et
+  `lot_declaration_state`, evidence RPC v2 ; écart annoncé/trouvé ou conflit
+  d'identité => `conflict_review` via update compensatoire qui répète les
+  gardes source/statut/structure/verrou. `announced_lot_count` n'est jamais
+  écrit. Déploiement obligatoire dans l'ordre migration/RPC M1 puis worker M3.
+- Identité avant création : numéro positif fiable > numéro positif du titre
+  > titre normalisé + ordre canonique. Lot 0, identité ambiguë/incomplète et
+  doublon candidat sont refusés ; une clé DB existante est toujours réutilisée.
+- Invariant de reprise testé : aucune dépense n'est ledgerée si le sync
+  échoue ; le rejeu relit les enfants, reproduit les mêmes clés/hash et
+  rematérialise sans création. Les erreurs possibles après promotion sont
+  re-sélectionnées par une lane `failed` étroite, même si le parent est déjà
+  `market`; les marchés ordinaires restent hors du périmètre standalone.
+- Contrat M1 accepté/rejeté contrôlé : garde humaine absorbée par le RPC =>
+  aucun sync standalone ; acceptation partielle => fail closed avant sync et
+  ledger, puis rejeu idempotent.
+- Preuves Node `v22.23.1` : `npm run test:ci` 452/452 (44 fichiers),
+  `npm run typecheck` OK, `npm run lint` OK, `npm run build` OK.
+- Commits locaux `[skip ci]` : `cee6422`, `3eb63ed`, `7e4bb71` ; aucun push,
+  merge, appel réel Supabase/OpenRouter ou déploiement Railway.
+- Reste hors de ce lot : merger puis déployer après M1, et prouver en
+  production sur plusieurs AO réels promotion, Lot 0, verrous humains,
+  absence de doublons et reprise après échec avant tout décommissionnement.

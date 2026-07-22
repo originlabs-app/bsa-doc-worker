@@ -21,9 +21,8 @@ export interface LotMaterializationTender {
 }
 
 // Exact copy of the edge guard (analyze-dce/handler.ts
-// shouldAutoMaterializeTenderLots), restricted to its market branch: the
-// worker only auto-materializes lots under an analyzed market mother. The
-// standalone→undetermined edge branch is deliberately out of scope here.
+// shouldAutoMaterializeTenderLots). The standalone branch is what lets the
+// deep-reading owner promote an AO whose lot structure was undetermined.
 export function shouldAutoMaterializeTenderLots(
   tender: LotMaterializationTender,
 ): boolean {
@@ -31,6 +30,11 @@ export function shouldAutoMaterializeTenderLots(
     return false;
   }
   if (tender.lot_structure_locked_at) return false;
+
+  if (tender.record_type === "standalone") {
+    return tender.lot_structure_mode === "undetermined";
+  }
+
   return tender.record_type === "market" &&
     tender.lot_structure_mode === "multi" &&
     tender.lot_structure_origin === "nukema_bot";

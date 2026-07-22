@@ -49,8 +49,39 @@ function queryResult(
     lte: (...args: unknown[]) => chain("lte", args),
     order: (...args: unknown[]) => chain("order", args),
     limit: (...args: unknown[]) => chain("limit", args),
-    eq: (...args: unknown[]) => chain("eq", args),
-    is: (...args: unknown[]) => chain("is", args),
+    eq: (...args: unknown[]) => {
+      const [column, value] = args as [string, unknown];
+      if (Array.isArray(current.data)) {
+        current = {
+          ...current,
+          data: current.data.filter((row) => valueAtPath(row, column) === value),
+        };
+      }
+      return chain("eq", args);
+    },
+    is: (...args: unknown[]) => {
+      const [column, value] = args as [string, unknown];
+      if (Array.isArray(current.data)) {
+        current = {
+          ...current,
+          data: current.data.filter((row) => valueAtPath(row, column) === value),
+        };
+      }
+      return chain("is", args);
+    },
+    lt: (...args: unknown[]) => {
+      const [column, value] = args as [string, number];
+      if (Array.isArray(current.data)) {
+        current = {
+          ...current,
+          data: current.data.filter((row) => {
+            const field = valueAtPath(row, column);
+            return typeof field === "number" && field < value;
+          }),
+        };
+      }
+      return chain("lt", args);
+    },
     not: (...args: unknown[]) => chain("not", args),
     filter: (...args: unknown[]) => chain("filter", args),
     update: (...args: unknown[]) => chain("update", args),
@@ -102,11 +133,14 @@ function fixtureClient(input: {
       return originalUpdate(...args);
     };
     if (table === "tender") {
-      // The existing-lot-children listing (LOT D roster) selects the bare id
-      // column without a prior update: route it to the tenderLots fixture.
+      // The existing-lot-children listing selects identity columns without a
+      // prior update: route it to the tenderLots fixture.
       const originalSelect = query.select;
       query.select = (...args: unknown[]) => {
-        if (!updateCalled && args[0] === "id") {
+        if (
+          !updateCalled &&
+          args[0] === "id,source_lot_key,lot_number,lot_title,lot_order"
+        ) {
           return queryResult(
             { data: input.tenderLots ?? [], error: null },
             tableOperations,
@@ -117,7 +151,7 @@ function fixtureClient(input: {
     }
     return query;
   });
-  const rpc = vi.fn(async (name: string) => {
+  const rpc = vi.fn(async (name: string, args?: Record<string, unknown>) => {
     if (input.rpcErrors && name in input.rpcErrors) {
       return { data: null, error: input.rpcErrors[name] };
     }
@@ -138,6 +172,10 @@ function fixtureClient(input: {
           updated: 0,
           preserved: 0,
           review_required: 0,
+          accepted_count: Array.isArray(args?.p_lots) ? args.p_lots.length : 0,
+          rejected_count: 0,
+          accepted: Array.isArray(args?.p_lots) ? args.p_lots : [],
+          rejected: [],
         },
         error: null,
       };
@@ -188,6 +226,8 @@ const tender = {
   lot_structure_mode: "multi",
   lot_structure_origin: "nukema_bot",
   lot_structure_locked_at: null,
+  announced_lot_count: 2,
+  lot_declaration_state: "declared_multi_unresolved",
 };
 
 const lotTender = {
@@ -257,6 +297,16 @@ describe("Supabase ANALYZE read adapter", () => {
         tender: { record_type: "standalone" },
       }],
       documents: [document],
+      tenderLots: [{
+        id: "lot-existing-1",
+        parent_tender_id: "tender-1",
+        record_type: "lot",
+        deleted_at: null,
+        source_lot_key: "metadata:lot-1",
+        lot_number: "1",
+        lot_title: "Gros œuvre",
+        lot_order: 0,
+      }],
       text: "Travaux de rénovation du bâtiment communal.",
     });
     const store = createSupabaseAnalyzeStore(fixture.client);
@@ -269,6 +319,16 @@ describe("Supabase ANALYZE read adapter", () => {
       status: "ready",
       assembly: {
         companyId: "company-1",
+        announcedLotCount: 2,
+        lotDeclarationState: "declared_multi_unresolved",
+        existingLotCount: 1,
+        existingLots: [{
+          id: "lot-existing-1",
+          sourceLotKey: "metadata:lot-1",
+          number: "1",
+          title: "Gros œuvre",
+          order: 0,
+        }],
         existingScore: 72,
         deadlineDate: "2026-09-30",
         dossier: {
@@ -352,6 +412,51 @@ describe("Supabase ANALYZE read adapter", () => {
         { method: "in", args: ["tender.record_type", ["standalone"]] },
       ]),
     );
+  });
+
+  it("reselects only a failed sync after a standalone was promoted to market", async () => {
+    const fixture = fixtureClient({
+      queue: [
+        {
+          id: "queue-replay",
+          tender_id: "tender-promoted",
+          attempts: 1,
+          status: "failed",
+          last_error: "ANALYZE_LOT_SYNC_FAILED",
+          tender: {
+            record_type: "market",
+            source: "Nukema API",
+            lot_structure_mode: "multi",
+            lot_structure_origin: "nukema_bot",
+            lot_structure_locked_at: null,
+          },
+        },
+        {
+          id: "queue-ordinary-market",
+          tender_id: "tender-ordinary",
+          attempts: 0,
+          status: "pending",
+          last_error: null,
+          tender: {
+            record_type: "market",
+            source: "Nukema API",
+            lot_structure_mode: "multi",
+            lot_structure_origin: "nukema_bot",
+            lot_structure_locked_at: null,
+          },
+        },
+      ],
+    });
+    const store = createSupabaseAnalyzeStore(fixture.client);
+
+    await expect(store.peekCandidates(
+      10,
+      "2026-07-21T08:00:00.000Z",
+    )).resolves.toEqual([{
+      queueId: "queue-replay",
+      tenderId: "tender-promoted",
+      attempts: 1,
+    }]);
   });
 
   it("widens the candidate perimeter to the configured record types", async () => {
@@ -510,6 +615,9 @@ describe("Supabase ANALYZE apply contract", () => {
       lot: null,
       autoMaterializeLots: false,
       existingLotCount: 0,
+      existingLots: [],
+      announcedLotCount: 2,
+      lotDeclarationState: "declared_multi_unresolved",
       existingScore: 72,
       deadlineDate: null,
       dossier: {
@@ -580,6 +688,9 @@ describe("Supabase ANALYZE apply contract", () => {
       companyId: "company-1",
       recordType: "lot",
       existingLotCount: 0,
+      existingLots: [],
+      announcedLotCount: null,
+      lotDeclarationState: null,
       lot: {
         parentTenderId: "parent-1",
         number: "1",
@@ -997,6 +1108,9 @@ describe("Supabase ANALYZE lot materialization (LOT C)", () => {
       lot: null,
       autoMaterializeLots,
       existingLotCount: 0,
+      existingLots: [],
+      announcedLotCount: 2,
+      lotDeclarationState: "declared_multi_unresolved",
       existingScore: 72,
       deadlineDate: null,
       dossier: {
@@ -1057,6 +1171,31 @@ describe("Supabase ANALYZE lot materialization (LOT C)", () => {
     };
   }
 
+  function discoveredPayload(
+    entries: Array<{ number: string | null; title: string }>,
+  ): AnalysisWritePayload {
+    const base = marketPayload(null);
+    return {
+      ...base,
+      lots: entries.map((entry) => ({
+        ...base.lots[0]!,
+        sourceLotKey: null,
+        number: entry.number,
+        title: entry.title,
+      })),
+    };
+  }
+
+  function standaloneAssembly(overrides: Record<string, unknown> = {}) {
+    return {
+      ...marketAssembly(true),
+      recordType: "standalone",
+      announcedLotCount: 2,
+      lotDeclarationState: "declared_multi_unresolved",
+      ...overrides,
+    };
+  }
+
   function rpcCall(
     fixture: ReturnType<typeof fixtureClient>,
     name: string,
@@ -1083,7 +1222,7 @@ describe("Supabase ANALYZE lot materialization (LOT C)", () => {
       p_parent_tender_id: "tender-1",
       p_analysis_state: "documentary_complete",
       p_extraction_source: "dce",
-      p_extractor_version: "analyze-dce-lots-v1",
+      p_extractor_version: "analyze-dce-lots-v2",
       p_run_evidence: expect.objectContaining({ queue_id: "queue-1" }),
     });
     expect(materialize?.p_input_hash).toMatch(/^[0-9a-f]{64}$/);
@@ -1097,6 +1236,226 @@ describe("Supabase ANALYZE lot materialization (LOT C)", () => {
     // The sync receives the exact same canonical lot payload.
     expect(rpcCall(fixture, "sync_tender_lot_analysis")?.p_lots)
       .toEqual(materialize?.p_lots);
+  });
+
+  it("promotes an eligible undetermined standalone after two documentary lots", async () => {
+    const fixture = fixtureClient({ tender, company });
+    const store = createSupabaseAnalyzeStore(fixture.client);
+
+    await store.createResultSink(standaloneAssembly()).write(discoveredPayload([
+      { number: "1", title: "Gros œuvre" },
+      { number: "2", title: "Électricité" },
+    ]));
+
+    const names = fixture.rpc.mock.calls.map(([name]) => name);
+    expect(names.indexOf("materialize_tender_lots"))
+      .toBeLessThan(names.indexOf("sync_tender_lot_analysis"));
+    expect(rpcCall(fixture, "materialize_tender_lots")).toMatchObject({
+      p_extraction_source: "dce",
+      p_lots: [
+        expect.objectContaining({ source_lot_key: "number:1" }),
+        expect.objectContaining({ source_lot_key: "number:2" }),
+      ],
+      p_run_evidence: expect.objectContaining({
+        announced_lot_count: 2,
+        discovered_lot_count: 2,
+        lot_count_delta: 0,
+        declaration_resolution: "confirmed_multi",
+        declaration_reliable: true,
+      }),
+    });
+  });
+
+  it("keeps the historical standalone path untouched below two candidates", async () => {
+    const fixture = fixtureClient({ tender, company });
+    const store = createSupabaseAnalyzeStore(fixture.client);
+
+    await store.createResultSink(standaloneAssembly({ announcedLotCount: 1 }))
+      .write(discoveredPayload([
+      { number: "1", title: "Lot unique" },
+      ]));
+
+    const names = fixture.rpc.mock.calls.map(([name]) => name);
+    expect(names).not.toContain("materialize_tender_lots");
+    expect(names).not.toContain("sync_tender_lot_analysis");
+    const tenderUpdate = fixture.updates.find((entry) => entry.table === "tender");
+    expect(tenderUpdate?.values).not.toHaveProperty("lot_declaration_state");
+  });
+
+  it("records a count conflict even when fewer than two lots prevent promotion", async () => {
+    const fixture = fixtureClient({ tender, company });
+    const store = createSupabaseAnalyzeStore(fixture.client);
+
+    await store.createResultSink(standaloneAssembly({ announcedLotCount: 2 }))
+      .write(discoveredPayload([{ number: "1", title: "Lot unique trouvé" }]));
+
+    const names = fixture.rpc.mock.calls.map(([name]) => name);
+    expect(names).not.toContain("materialize_tender_lots");
+    expect(names).not.toContain("sync_tender_lot_analysis");
+    expect(fixture.updates).toContainEqual({
+      table: "tender",
+      values: { lot_declaration_state: "conflict_review" },
+    });
+    expect(fixture.operations.get("tender")).toEqual(expect.arrayContaining([
+      { method: "eq", args: ["record_type", "standalone"] },
+      { method: "eq", args: ["lot_structure_mode", "undetermined"] },
+      { method: "is", args: ["lot_structure_locked_at", null] },
+    ]));
+  });
+
+  it("marks an announced/discovered count gap for review without overwriting M1", async () => {
+    const logger = { info: vi.fn() };
+    const fixture = fixtureClient({ tender, company });
+    const store = createSupabaseAnalyzeStore(fixture.client, { logger });
+
+    await store.createResultSink(standaloneAssembly({ announcedLotCount: 3 }))
+      .write(discoveredPayload([
+        { number: "1", title: "Gros œuvre" },
+        { number: "2", title: "Électricité" },
+      ]));
+
+    const conflictUpdate = fixture.updates.find((entry) =>
+      entry.table === "tender" &&
+      (entry.values as Record<string, unknown>).lot_declaration_state ===
+        "conflict_review"
+    );
+    expect(conflictUpdate?.values).toMatchObject({
+      lot_declaration_state: "conflict_review",
+    });
+    expect(fixture.updates.every((entry) =>
+      !("announced_lot_count" in (entry.values as Record<string, unknown>))
+    )).toBe(true);
+    expect(logger.info).toHaveBeenCalledWith(
+      "analyze_lot_count_conflict",
+      expect.objectContaining({ announced: 3, discovered: 2, delta: -1 }),
+    );
+    expect(fixture.operations.get("tender")).toEqual(expect.arrayContaining([
+      { method: "eq", args: ["source", "Nukema API"] },
+      { method: "eq", args: ["status", "opportunity"] },
+      { method: "eq", args: ["record_type", "market"] },
+      { method: "eq", args: ["lot_structure_mode", "multi"] },
+      { method: "eq", args: ["lot_structure_origin", "nukema_bot"] },
+      { method: "is", args: ["lot_structure_locked_at", null] },
+    ]));
+  });
+
+  it("never sends canonical Lot 0 and records the identity conflict", async () => {
+    const fixture = fixtureClient({ tender, company });
+    const store = createSupabaseAnalyzeStore(fixture.client);
+
+    await store.createResultSink(standaloneAssembly({ announcedLotCount: 3 }))
+      .write(discoveredPayload([
+        { number: "0", title: "Lot indéterminé" },
+        { number: "1", title: "Gros œuvre" },
+        { number: "2", title: "Électricité" },
+      ]));
+
+    const materialize = rpcCall(fixture, "materialize_tender_lots");
+    expect(materialize?.p_lots).toEqual([
+      expect.objectContaining({ lot_number: "1" }),
+      expect.objectContaining({ lot_number: "2" }),
+    ]);
+    expect(materialize?.p_run_evidence).toMatchObject({
+      identity_issues: ["lot_zero_unresolved"],
+    });
+    const conflictUpdate = fixture.updates.find((entry) =>
+      entry.table === "tender" &&
+      (entry.values as Record<string, unknown>).lot_declaration_state ===
+        "conflict_review"
+    );
+    expect(conflictUpdate?.values).toMatchObject({
+      lot_declaration_state: "conflict_review",
+    });
+  });
+
+  it("reuses a live child identity before materialization", async () => {
+    const fixture = fixtureClient({ tender, company });
+    const store = createSupabaseAnalyzeStore(fixture.client);
+
+    await store.createResultSink(standaloneAssembly({
+      existingLotCount: 1,
+      existingLots: [{
+        id: "lot-existing-1",
+        sourceLotKey: "metadata:lot-1",
+        number: "1",
+        title: "Gros œuvre",
+        order: 0,
+      }],
+    })).write(discoveredPayload([
+      { number: "1", title: "Gros œuvre relu" },
+      { number: "2", title: "Électricité" },
+    ]));
+
+    expect(rpcCall(fixture, "materialize_tender_lots")?.p_lots).toEqual([
+      expect.objectContaining({ source_lot_key: "metadata:lot-1" }),
+      expect.objectContaining({ source_lot_key: "number:2" }),
+    ]);
+  });
+
+  it("replays materialize then sync after a partial failure without changing identities", async () => {
+    const first = fixtureClient({
+      tender,
+      company,
+      rpcErrors: { sync_tender_lot_analysis: { message: "connection reset" } },
+    });
+    const payload = discoveredPayload([
+      { number: "1", title: "Gros œuvre" },
+      { number: "2", title: "Électricité" },
+    ]);
+    await expect(
+      createSupabaseAnalyzeStore(first.client)
+        .createResultSink(standaloneAssembly())
+        .write(payload),
+    ).rejects.toThrow("ANALYZE_LOT_SYNC_FAILED");
+    expect(first.rpc.mock.calls.map(([name]) => name)).not.toContain("record_ai_spend");
+
+    const replay = fixtureClient({
+      tender,
+      company,
+      rpcResults: {
+        materialize_tender_lots: {
+          run_id: "run-replay",
+          created: 0,
+          updated: 2,
+          preserved: 0,
+          review_required: 0,
+          accepted_count: 2,
+          rejected_count: 0,
+          rejected: [],
+        },
+      },
+    });
+    await createSupabaseAnalyzeStore(replay.client)
+      .createResultSink(standaloneAssembly({
+        existingLotCount: 2,
+        existingLots: [
+          {
+            id: "lot-1",
+            sourceLotKey: "number:1",
+            number: "1",
+            title: "Gros œuvre",
+            order: 0,
+          },
+          {
+            id: "lot-2",
+            sourceLotKey: "number:2",
+            number: "2",
+            title: "Électricité",
+            order: 1,
+          },
+        ],
+      }))
+      .write(payload);
+
+    expect(rpcCall(replay, "materialize_tender_lots")?.p_lots)
+      .toEqual(rpcCall(first, "materialize_tender_lots")?.p_lots);
+    expect(replay.rpc.mock.calls.map(([name]) => name)).toEqual(
+      expect.arrayContaining([
+        "materialize_tender_lots",
+        "sync_tender_lot_analysis",
+        "record_ai_spend",
+      ]),
+    );
   });
 
   it("writes the four cited business fields with full source evidence", async () => {
@@ -1291,6 +1650,79 @@ describe("Supabase ANALYZE lot materialization (LOT C)", () => {
     );
   });
 
+  it("does not sync a standalone when M1 reports a human guard rejection", async () => {
+    const fixture = fixtureClient({
+      tender,
+      company,
+      rpcResults: {
+        materialize_tender_lots: {
+          run_id: "run-guarded",
+          created: 0,
+          updated: 0,
+          preserved: 0,
+          review_required: 0,
+          accepted_count: 0,
+          rejected_count: 2,
+          accepted: [],
+          rejected: [
+            { index: 0, source_lot_key: "number:1", reason: "materialization_blocked" },
+            { index: 1, source_lot_key: "number:2", reason: "materialization_blocked" },
+          ],
+        },
+      },
+    });
+    const logger = { info: vi.fn() };
+    const store = createSupabaseAnalyzeStore(fixture.client, { logger });
+
+    await store.createResultSink(standaloneAssembly()).write(discoveredPayload([
+      { number: "1", title: "Gros œuvre" },
+      { number: "2", title: "Électricité" },
+    ]));
+
+    const names = fixture.rpc.mock.calls.map(([name]) => name);
+    expect(names).toContain("materialize_tender_lots");
+    expect(names).not.toContain("sync_tender_lot_analysis");
+    expect(names).toContain("record_ai_spend");
+    expect(logger.info).toHaveBeenCalledWith(
+      "analyze_lot_materialization_skipped",
+      expect.objectContaining({ rejected_count: 2 }),
+    );
+  });
+
+  it("fails closed before sync when M1 accepts only part of the roster", async () => {
+    const fixture = fixtureClient({
+      tender,
+      company,
+      rpcResults: {
+        materialize_tender_lots: {
+          run_id: "run-partial",
+          created: 1,
+          updated: 0,
+          preserved: 0,
+          review_required: 0,
+          accepted_count: 1,
+          rejected_count: 1,
+          rejected: [{
+            index: 1,
+            source_lot_key: "number:2",
+            reason: "invalid_source_lot_key",
+          }],
+        },
+      },
+    });
+    const store = createSupabaseAnalyzeStore(fixture.client);
+
+    await expect(
+      store.createResultSink(standaloneAssembly()).write(discoveredPayload([
+        { number: "1", title: "Gros œuvre" },
+        { number: "2", title: "Électricité" },
+      ])),
+    ).rejects.toThrow("ANALYZE_LOT_MATERIALIZE_PARTIAL");
+    const names = fixture.rpc.mock.calls.map(([name]) => name);
+    expect(names).not.toContain("sync_tender_lot_analysis");
+    expect(names).not.toContain("record_ai_spend");
+  });
+
   it("fails closed on a non-guard materialization error", async () => {
     const fixture = fixtureClient({
       tender,
@@ -1350,6 +1782,9 @@ describe("Supabase ANALYZE hardening (LOT D)", () => {
       lot: null,
       autoMaterializeLots: true,
       existingLotCount: 0,
+      existingLots: [],
+      announcedLotCount: 2,
+      lotDeclarationState: "declared_multi_unresolved",
       existingScore: 72,
       deadlineDate: null,
       dossier: {
@@ -1696,7 +2131,28 @@ describe("Supabase ANALYZE hardening (LOT D)", () => {
         tender,
         company,
         documents: [document],
-        tenderLots: [{ id: "lot-a" }, { id: "lot-b" }],
+        tenderLots: [
+          {
+            id: "lot-a",
+            parent_tender_id: "tender-1",
+            record_type: "lot",
+            deleted_at: null,
+            source_lot_key: "number:1",
+            lot_number: "1",
+            lot_title: "Lot 1",
+            lot_order: 0,
+          },
+          {
+            id: "lot-b",
+            parent_tender_id: "tender-1",
+            record_type: "lot",
+            deleted_at: null,
+            source_lot_key: "number:2",
+            lot_number: "2",
+            lot_title: "Lot 2",
+            lot_order: 1,
+          },
+        ],
       });
       const store = createSupabaseAnalyzeStore(fixture.client);
 
@@ -1732,6 +2188,9 @@ describe("Supabase ANALYZE market zero-information guard (LOT E)", () => {
       lot: null,
       autoMaterializeLots: true,
       existingLotCount: 0,
+      existingLots: [],
+      announcedLotCount: 2,
+      lotDeclarationState: "declared_multi_unresolved",
       existingScore: 72,
       deadlineDate: null,
       dossier: {
