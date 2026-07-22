@@ -576,3 +576,42 @@ titulaire (coût combiné, métadonnées non éclatées sur ce chemin).
 - Reste hors de ce lot : merger puis déployer après M1, et prouver en
   production sur plusieurs AO réels promotion, Lot 0, verrous humains,
   absence de doublons et reprise après échec avant tout décommissionnement.
+## 2026-07-22 — M8 : observabilité recovery + diagnostic AW
+
+Bénéfice : un échec recovery n'est plus muet. Le registre et l'event
+`recovery_attempt_completed` portent le même objet `failure` avec étape, type,
+message nettoyé, reason code, retryabilité et unités dépensées par tentative.
+Les erreurs login/navigation/captcha/download/réseau, manifeste, upload et
+persistance restent ainsi actionnables sans exposer URL signée, cookie ou
+secret. Le backoff et le schéma SQL sont inchangés (evidence JSON additive).
+
+- Lane dédiée `fix/recovery-observability-aw-m8`, base fraîche
+  `origin/main@678ee8e`; périmètre limité à recovery/adapters/download + tests.
+- Cause AW identifiée : Browserless remplit le CAPTCHA et annonce le solve,
+  mais AW rejette ensuite la réponse image custom. La signature déjà prouvée
+  par sonde HTTP est le rebond
+  `dce.avertissement&typeErreur=captcha`, auparavant avalé sous le faux
+  diagnostic `AW select-all control is unavailable`. Le worker détecte
+  maintenant cette signature et rend `CAPTCHA_UNSOLVED`, retryable,
+  `stage=captcha`, `type=captcha`, message
+  `AW rejected the Browserless CAPTCHA answer`.
+- Preuve réelle isolée sur la fixture publique GPMM IDM `1840818`, référence
+  `202602004`, sans lecture/écriture Supabase et donc sans toucher un dossier
+  en backoff : 2 probes, CAPTCHA détecté puis rempli à chaque fois, aucun
+  manifeste ni téléchargement obtenu, 0 écriture production. Arrêt ensuite,
+  sans troisième tentative ni force brute : blocage externe AW documenté.
+- Budget : garde interne CAPTCHA respecté à 10 unités par probe, soit 20
+  unités engagées au total. La mesure compte a retourné 0 unité au premier
+  intervalle puis 33 au second (facturation vraisemblablement retardée du
+  premier incluse) : le plafond mission de 20 unités mesurées est donc dépassé
+  malgré le garde interne. Incident déclaré explicitement ; aucune autre
+  session Browserless lancée.
+- Tests : RED prouvé sur erreurs muettes, delta d'unités et rebond CAPTCHA AW ;
+  suite finale 43 fichiers / 435 tests verts, typecheck vert, lint vert, build
+  vert, `git diff --check` vert.
+- Commits fonctionnels `[skip ci]` : `4374801` (failure structurée + coût),
+  `6b65438` (rejet CAPTCHA AW correctement qualifié).
+- Aucun push, merge, deploy Railway, téléchargement persistant ou écriture
+  BSA/prod. Statut : `BLOCKED_EXTERNAL_AW_CAPTCHA`, prêt pour revue
+  orchestrateur ; les correspondances restent récupérables au prochain run
+  autorisé si AW accepte une réponse Browserless, avec backoff inchangé.
