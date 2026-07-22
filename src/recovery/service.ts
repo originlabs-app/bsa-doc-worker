@@ -4,6 +4,7 @@ import type { WorkerLogger } from "../logger.js";
 import {
   RECOVERY_PORTALS,
   RecoveryTooLargeError,
+  type RecoveryFailure,
   type MatchEvidence,
   type PortalSearchResult,
   type RecoveryAttemptStatus,
@@ -13,6 +14,7 @@ import {
   type RecoveryPortal,
   type RecoveryTarget,
 } from "./contracts.js";
+import { toRecoveryFailure } from "./failure.js";
 import { reconcilePortalCandidates } from "./matching.js";
 
 export interface RecoverySweepConfig {
@@ -69,6 +71,7 @@ function safeEvidence(
       error_code: result.errorCode ?? null,
       blocked_external_host: result.blockedExternalHost ?? null,
       request_count: result.requestCount ?? null,
+      ...(result.failure ? { failure: result.failure } : {}),
       candidates: result.candidates.map((candidate) => ({
         title: candidate.canonicalTitle,
         reference: candidate.reference,
@@ -136,26 +139,6 @@ function increment(report: RecoverySweepReport, status: RecoveryAttemptStatus): 
   else report.nError += 1;
 }
 
-// Persisted next to the search evidence so a 'blocked' or 'error' attempt in
-// tender_dce_recovery_attempt is never mute about what actually failed.
-function failureEvidence(error: unknown): Record<string, unknown> {
-  const shaped = error as { reasonCode?: unknown; retryable?: unknown };
-  return {
-    reason_code:
-      error && typeof error === "object" && "reasonCode" in error
-        ? String(shaped.reasonCode)
-        : null,
-    retryable:
-      error && typeof error === "object" && "retryable" in error
-        ? Boolean(shaped.retryable)
-        : null,
-    message: (error instanceof Error ? error.message : String(error)).slice(
-      0,
-      500,
-    ),
-  };
-}
-
 function errorReason(error: unknown): "blocked" | "error" {
   if (!error || typeof error !== "object" || !("reasonCode" in error)) {
     return "error";
@@ -164,6 +147,65 @@ function errorReason(error: unknown): "blocked" | "error" {
   return /BLOCKED|CAPTCHA|AUTHENTICATION|PROFILE_LINK/.test(reason)
     ? "blocked"
     : "error";
+}
+
+function unitsNow(dependencies: RecoverySweepDependencies): number {
+  return dependencies.captchaUnits?.() ?? 0;
+}
+
+function withAttemptUnits(
+  failure: RecoveryFailure,
+  dependencies: RecoverySweepDependencies,
+  unitsAtStart: number,
+): RecoveryFailure {
+  return {
+    ...failure,
+    units_spent: Math.max(0, unitsNow(dependencies) - unitsAtStart),
+  };
+}
+
+function logAttemptCompleted(
+  dependencies: RecoverySweepDependencies,
+  input: {
+    tenderId: string;
+    portal: RecoveryPortal | null;
+    decision: RecoveryDecision | "blocked" | "error";
+    status: RecoveryAttemptStatus;
+    unitsAtStart: number;
+    failure?: RecoveryFailure;
+  },
+): void {
+  const units = unitsNow(dependencies);
+  dependencies.logger?.info("recovery_attempt_completed", {
+    tender_id: input.tenderId,
+    portal: input.portal,
+    decision: input.decision,
+    status: input.status,
+    units,
+    units_spent: Math.max(0, units - input.unitsAtStart),
+    ...(input.failure
+      ? {
+          issue: input.failure.reason_code ?? input.failure.type,
+          reason_code: input.failure.reason_code,
+          failure_message: input.failure.message,
+          failure: input.failure,
+        }
+      : {}),
+  });
+}
+
+function externalPortalFailure(
+  host: string,
+  unitsSpent: number,
+): RecoveryFailure {
+  return toRecoveryFailure(null, {
+    stage: "identification",
+    type: "external_portal",
+    reasonCode: "UNSUPPORTED_PORTAL",
+    retryable: false,
+    message: `Buyer profile resolves to unsupported host ${host}`,
+    unitsSpent,
+  });
 }
 
 async function finalize(
@@ -202,23 +244,42 @@ export async function runRecoverySweep(
         ? await dependencies.store.reserve(target.tenderId)
         : null;
     if (config.mode === "apply" && reservation === null) continue;
+    const unitsAtStart = unitsNow(dependencies);
 
     let searchResults: PortalSearchResult[];
     try {
       searchResults = await Promise.all(
-        RECOVERY_PORTALS.map((portal) =>
-          dependencies.searchPortal(portal, target).catch(() => ({
-            portal,
-            candidates: [],
-            errorCode: "PORTAL_SEARCH_FAILED",
-          })),
-        ),
+        RECOVERY_PORTALS.map(async (portal) => {
+          try {
+            return await dependencies.searchPortal(portal, target);
+          } catch (error) {
+            return {
+              portal,
+              candidates: [],
+              errorCode: "PORTAL_SEARCH_FAILED",
+              failure: toRecoveryFailure(error, {
+                stage: "identification",
+                type: "network",
+                reasonCode: "PORTAL_SEARCH_FAILED",
+                retryable: true,
+                unitsSpent: 0,
+              }),
+            };
+          }
+        }),
       );
-    } catch {
+    } catch (error) {
       searchResults = RECOVERY_PORTALS.map((portal) => ({
         portal,
         candidates: [],
         errorCode: "PORTAL_SEARCH_FAILED",
+        failure: toRecoveryFailure(error, {
+          stage: "identification",
+          type: "network",
+          reasonCode: "PORTAL_SEARCH_FAILED",
+          retryable: true,
+          unitsSpent: 0,
+        }),
       }));
     }
 
@@ -254,21 +315,52 @@ export async function runRecoverySweep(
       ) status = "blocked";
       else status = "not_found";
       increment(report, status);
+      const blockedHost = searchResults.find(
+        ({ blockedExternalHost }) => blockedExternalHost,
+      )?.blockedExternalHost;
+      const baseFailure = status === "error"
+        ? searchResults.find(({ failure }) => failure)?.failure ??
+          toRecoveryFailure(null, {
+            stage: "identification",
+            type: "network",
+            reasonCode: "PORTAL_SEARCH_FAILED",
+            retryable: true,
+            message: "All portal searches failed",
+            unitsSpent: 0,
+          })
+        : status === "blocked"
+          ? externalPortalFailure(
+              blockedHost ?? new URL(target.buyerProfileLink).hostname,
+              0,
+            )
+          : undefined;
+      const failure = baseFailure
+        ? withAttemptUnits(baseFailure, dependencies, unitsAtStart)
+        : undefined;
       if (reservation) {
+        const decision = status === "ambiguous"
+          ? "medium"
+          : status === "blocked"
+            ? "blocked"
+            : status === "error"
+              ? "error"
+              : "low";
         await finalize(
           dependencies.store,
           reservation.attemptId,
           status,
           null,
-          status === "ambiguous"
-            ? "medium"
-            : status === "blocked"
-              ? "blocked"
-              : status === "error"
-                ? "error"
-                : "low",
-          evidence,
+          decision,
+          failure ? { ...evidence, failure } : evidence,
         );
+        logAttemptCompleted(dependencies, {
+          tenderId: target.tenderId,
+          portal: null,
+          decision,
+          status,
+          unitsAtStart,
+          ...(failure ? { failure } : {}),
+        });
       }
       continue;
     }
@@ -276,14 +368,27 @@ export async function runRecoverySweep(
     if (reconciliation.match.candidate.recoveryDisposition === "external_blocked") {
       increment(report, "blocked");
       if (reservation) {
+        const failure = externalPortalFailure(
+          reconciliation.match.candidate.blockedExternalHost ??
+            new URL(reconciliation.match.candidate.consultationUrl).hostname,
+          0,
+        );
         await finalize(
           dependencies.store,
           reservation.attemptId,
           "blocked",
           reconciliation.match.candidate.portal,
           reconciliation.match.level,
-          evidence,
+          { ...evidence, failure },
         );
+        logAttemptCompleted(dependencies, {
+          tenderId: target.tenderId,
+          portal: reconciliation.match.candidate.portal,
+          decision: reconciliation.match.level,
+          status: "blocked",
+          unitsAtStart,
+          failure,
+        });
       }
       continue;
     }
@@ -295,6 +400,7 @@ export async function runRecoverySweep(
     if (!reservation) continue;
 
     const { match } = reconciliation;
+    let failureStage: "manifest" | "download" | "persistence" = "manifest";
     try {
       const discovery = await dependencies.discover(
         match.candidate.portal,
@@ -307,12 +413,14 @@ export async function runRecoverySweep(
         attachments: discovery.safeManifest.attachments.length,
         units: dependencies.captchaUnits?.() ?? 0,
       });
+      failureStage = "download";
       const prepared = await dependencies.pipeline.fetchAndUpload({
         target,
         match,
         discovery,
       });
       try {
+        failureStage = "persistence";
         const persisted = await dependencies.store.persistFound({
           attemptId: reservation.attemptId,
           tenderId: target.tenderId,
@@ -342,6 +450,13 @@ export async function runRecoverySweep(
           queue_status: persisted.queueStatus,
           units: dependencies.captchaUnits?.() ?? 0,
         });
+        logAttemptCompleted(dependencies, {
+          tenderId: target.tenderId,
+          portal: match.candidate.portal,
+          decision: match.level,
+          status: "found",
+          unitsAtStart,
+        });
       } catch (error) {
         await prepared.rollback().catch(() => undefined);
         throw error;
@@ -353,7 +468,10 @@ export async function runRecoverySweep(
       const status = error instanceof RecoveryTooLargeError
         ? "too_large"
         : errorReason(error);
-      const failure = failureEvidence(error);
+      const failure = toRecoveryFailure(error, {
+        stage: failureStage,
+        unitsSpent: Math.max(0, unitsNow(dependencies) - unitsAtStart),
+      });
       increment(report, status);
       await finalize(
         dependencies.store,
@@ -363,14 +481,13 @@ export async function runRecoverySweep(
         status === "too_large" ? match.level : status,
         { ...evidence, failure },
       );
-      dependencies.logger?.info("recovery_attempt_completed", {
-        tender_id: target.tenderId,
+      logAttemptCompleted(dependencies, {
+        tenderId: target.tenderId,
         portal: match.candidate.portal,
         decision: status === "too_large" ? match.level : status,
         status,
-        reason_code: failure.reason_code,
-        failure_message: failure.message,
-        units: dependencies.captchaUnits?.() ?? 0,
+        unitsAtStart,
+        failure,
       });
     }
   }

@@ -10,6 +10,8 @@ import type {
   DownloadReceipt,
   EphemeralAttachment,
 } from "./ports.js";
+import { sanitizeRecoveryFailureMessage } from "./recovery/failure.js";
+import type { RecoveryFailureType } from "./recovery/contracts.js";
 
 const DEFAULT_MAX_BYTES = 100 * 1024 * 1024;
 const MAX_REDIRECTS = 3;
@@ -26,15 +28,38 @@ export interface StreamAttachmentOptions {
 
 export class DownloadError extends Error {
   readonly reasonCode = "DOWNLOAD_INCOMPLETE" as const;
+  readonly failureStage = "download" as const;
+  readonly failureType: RecoveryFailureType;
+  readonly failureMessage: string;
+  readonly retryable: boolean;
 
-  constructor(readonly kind: "incomplete" | "too_large" = "incomplete") {
+  constructor(
+    readonly kind: "incomplete" | "too_large" = "incomplete",
+    options: {
+      type?: RecoveryFailureType;
+      message?: string;
+      retryable?: boolean;
+    } = {},
+  ) {
     super("DOWNLOAD_INCOMPLETE");
     this.name = "DownloadError";
+    this.failureType = options.type ??
+      (kind === "too_large" ? "validation" : "download");
+    this.failureMessage = sanitizeRecoveryFailureMessage(
+      options.message ??
+        (kind === "too_large"
+          ? "Attachment exceeds the configured byte limit"
+          : "Attachment download is incomplete"),
+    );
+    this.retryable = options.retryable ?? kind !== "too_large";
   }
 }
 
-function failDownload(kind: "incomplete" | "too_large" = "incomplete"): never {
-  throw new DownloadError(kind);
+function failDownload(
+  kind: "incomplete" | "too_large" = "incomplete",
+  options: ConstructorParameters<typeof DownloadError>[1] = {},
+): never {
+  throw new DownloadError(kind, options);
 }
 
 function isHostOrSubdomain(hostname: string, rootHost: string): boolean {
@@ -101,27 +126,47 @@ async function fetchAllowlisted(
 ): Promise<Response> {
   const initialUrl = new URL(attachment.downloadUrl);
   if (!isAllowedAttachmentUrl(initialUrl, attachment.sourcePlatform)) {
-    failDownload();
+    failDownload("incomplete", {
+      message: "Attachment URL is outside the portal allowlist",
+      retryable: false,
+    });
   }
   let currentUrl = initialUrl;
 
   for (let redirect = 0; redirect <= MAX_REDIRECTS; redirect += 1) {
-    const response = await fetcher(currentUrl, {
-      headers: safeHeaders(
-        attachment.requestHeaders,
-        initialUrl.hostname,
-        currentUrl.hostname,
-      ),
-      redirect: "manual",
-    });
+    let response: Response;
+    try {
+      response = await fetcher(currentUrl, {
+        headers: safeHeaders(
+          attachment.requestHeaders,
+          initialUrl.hostname,
+          currentUrl.hostname,
+        ),
+        redirect: "manual",
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      failDownload("incomplete", {
+        type: "network",
+        message: `Attachment request failed: ${message}`,
+        retryable: true,
+      });
+    }
     if (response.status < 300 || response.status >= 400) return response;
 
     const location = response.headers.get("location");
     await response.body?.cancel();
-    if (!location || redirect === MAX_REDIRECTS) failDownload();
+    if (!location || redirect === MAX_REDIRECTS) {
+      failDownload("incomplete", {
+        message: "Attachment redirect chain is incomplete",
+      });
+    }
     const nextUrl = new URL(location, currentUrl);
     if (!isAllowedAttachmentUrl(nextUrl, attachment.sourcePlatform)) {
-      failDownload();
+      failDownload("incomplete", {
+        message: "Attachment redirect leaves the portal allowlist",
+        retryable: false,
+      });
     }
     currentUrl = nextUrl;
   }
@@ -165,9 +210,20 @@ export async function streamAttachment(
     failDownload("too_large");
   }
   const response = await fetchAllowlisted(attachment, fetcher);
-  if (!response.ok || !response.body) failDownload();
+  if (!response.ok) {
+    failDownload("incomplete", {
+      message: `Attachment returned HTTP ${response.status}`,
+    });
+  }
+  if (!response.body) {
+    failDownload("incomplete", { message: "Attachment response has no body" });
+  }
   const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
-  if (contentType.includes("text/html")) failDownload();
+  if (contentType.includes("text/html")) {
+    failDownload("incomplete", {
+      message: "Attachment response is HTML instead of a document",
+    });
+  }
   const declaredSize = Number(response.headers.get("content-length"));
   if (Number.isFinite(declaredSize) && declaredSize > maxBytes) {
     failDownload("too_large");
@@ -206,10 +262,14 @@ export async function streamAttachment(
       quarantine.writable,
     );
     if (bytes === 0 || !hasExpectedMagic(attachment.kind, preview)) {
-      failDownload();
+      failDownload("incomplete", {
+        message: "Attachment content does not match the expected document type",
+      });
     }
     if (attachment.expectedSize !== null && attachment.expectedSize !== bytes) {
-      failDownload();
+      failDownload("incomplete", {
+        message: "Attachment byte count does not match the manifest",
+      });
     }
     await quarantine.validate();
     const receipt: DownloadReceipt = {
@@ -222,6 +282,11 @@ export async function streamAttachment(
   } catch (error) {
     await quarantine.abort().catch(() => undefined);
     if (error instanceof DownloadError) throw error;
-    throw new DownloadError();
+    const message = error instanceof Error ? error.message : String(error);
+    throw new DownloadError("incomplete", {
+      type: "network",
+      message: `Attachment stream failed: ${message}`,
+      retryable: true,
+    });
   }
 }

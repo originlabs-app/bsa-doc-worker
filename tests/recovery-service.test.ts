@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { AwAdapterError } from "../src/adapters/aw-solutions.js";
+import { DownloadError } from "../src/download.js";
 import type { AdapterDiscovery } from "../src/ports.js";
 import type {
   PortalCandidate,
@@ -236,60 +237,204 @@ describe("runRecoverySweep", () => {
 });
 
 describe("runRecoverySweep failure evidence", () => {
-  it("records the CAPTCHA wall detail in the blocked attempt evidence", async () => {
+  it("records the structured CAPTCHA failure in evidence and the completion event", async () => {
     const fixture = dependencies();
-    vi.mocked(fixture.deps.discover).mockRejectedValueOnce(
-      new AwAdapterError(
+    const info = vi.fn();
+    let captchaUnits = 0;
+    vi.mocked(fixture.deps.discover).mockImplementationOnce(async () => {
+      captchaUnits = 10;
+      throw new AwAdapterError(
         "CAPTCHA_UNSOLVED",
         true,
         "Browserless did not solve the AW CAPTCHA (captcha_not_recognized_by_browserless)",
-      ),
-    );
+      );
+    });
+    const deps = {
+      ...fixture.deps,
+      captchaUnits: () => captchaUnits,
+      logger: { info },
+    };
 
     const report = await runRecoverySweep(
       { mode: "apply", batchSize: 25 },
-      fixture.deps,
+      deps,
     );
 
     expect(report.nBlocked).toBe(1);
+    const failure = {
+      stage: "captcha",
+      type: "captcha",
+      reason_code: "CAPTCHA_UNSOLVED",
+      retryable: true,
+      message: expect.stringContaining(
+        "captcha_not_recognized_by_browserless",
+      ) as unknown as string,
+      units_spent: 10,
+    };
     expect(fixture.store.finalize).toHaveBeenCalledWith(
       expect.objectContaining({
         status: "blocked",
         decision: "blocked",
         evidence: expect.objectContaining({
-          failure: {
-            reason_code: "CAPTCHA_UNSOLVED",
-            retryable: true,
-            message: expect.stringContaining(
-              "captcha_not_recognized_by_browserless",
-            ) as unknown as string,
-          },
+          failure,
         }),
+      }),
+    );
+    expect(info).toHaveBeenCalledWith(
+      "recovery_attempt_completed",
+      expect.objectContaining({
+        status: "blocked",
+        failure,
+        units: 10,
       }),
     );
   });
 
-  it("records an unknown failure message in the error attempt evidence", async () => {
+  it("records and redacts a swallowed identification network failure", async () => {
     const fixture = dependencies();
-    vi.mocked(fixture.deps.discover).mockRejectedValueOnce(
-      new Error("socket hang up"),
+    const info = vi.fn();
+    vi.mocked(fixture.deps.searchPortal).mockRejectedValue(
+      new Error(
+        "fetch failed at https://www.marches-publics.info/Annonces/lister?token=must-not-leak",
+      ),
     );
 
     const report = await runRecoverySweep(
       { mode: "apply", batchSize: 25 },
-      fixture.deps,
+      { ...fixture.deps, logger: { info } },
     );
 
     expect(report.nError).toBe(1);
+    const failure = {
+      stage: "identification",
+      type: "network",
+      reason_code: "PORTAL_SEARCH_FAILED",
+      retryable: true,
+      message: expect.stringContaining("fetch failed") as unknown as string,
+      units_spent: 0,
+    };
     expect(fixture.store.finalize).toHaveBeenCalledWith(
       expect.objectContaining({
         status: "error",
         evidence: expect.objectContaining({
-          failure: {
-            reason_code: null,
-            retryable: null,
-            message: "socket hang up",
-          },
+          failure,
+        }),
+      }),
+    );
+    const finalized = vi.mocked(fixture.store.finalize).mock.calls[0]?.[0];
+    expect(JSON.stringify(finalized?.evidence)).not.toContain("must-not-leak");
+    expect(info).toHaveBeenCalledWith(
+      "recovery_attempt_completed",
+      expect.objectContaining({ status: "error", failure }),
+    );
+  });
+
+  it("documents an external buyer-profile block at identification", async () => {
+    const fixture = dependencies();
+    const info = vi.fn();
+    const externalCandidate: PortalCandidate = {
+      ...exactCandidate,
+      portal: "aw_solutions",
+      consultationUrl:
+        "https://www.marches-publics.info/Annonces/MPI-pub-20262001118.htm",
+      recoveryDisposition: "external_blocked",
+      blockedExternalHost: "plateforme.alsacemarchespublics.eu",
+    };
+    vi.mocked(fixture.deps.searchPortal).mockImplementation(async (portal) => ({
+      portal,
+      candidates: portal === "aw_solutions" ? [externalCandidate] : [],
+      ...(portal === "aw_solutions"
+        ? { blockedExternalHost: "plateforme.alsacemarchespublics.eu" }
+        : {}),
+    }));
+
+    await runRecoverySweep(
+      { mode: "apply", batchSize: 25 },
+      { ...fixture.deps, logger: { info } },
+    );
+
+    const failure = {
+      stage: "identification",
+      type: "external_portal",
+      reason_code: "UNSUPPORTED_PORTAL",
+      retryable: false,
+      message: expect.stringContaining(
+        "plateforme.alsacemarchespublics.eu",
+      ) as unknown as string,
+      units_spent: 0,
+    };
+    expect(fixture.store.finalize).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "blocked",
+        evidence: expect.objectContaining({ failure }),
+      }),
+    );
+    expect(info).toHaveBeenCalledWith(
+      "recovery_attempt_completed",
+      expect.objectContaining({ status: "blocked", failure }),
+    );
+  });
+
+  it("keeps CAPTCHA units scoped to the attempt that spent them", async () => {
+    const fixture = dependencies();
+    const secondTarget = { ...target, tenderId: "tender-2" };
+    vi.mocked(fixture.store.listEligible).mockResolvedValueOnce([
+      target,
+      secondTarget,
+    ]);
+    let captchaUnits = 0;
+    vi.mocked(fixture.deps.discover)
+      .mockImplementationOnce(async () => {
+        captchaUnits = 10;
+        throw new AwAdapterError("CAPTCHA_UNSOLVED", true, "captcha failed");
+      })
+      .mockRejectedValueOnce(
+        new AwAdapterError(
+          "AW_AUTHENTICATION_REJECTED",
+          false,
+          "login rejected",
+        ),
+      );
+
+    await runRecoverySweep(
+      { mode: "apply", batchSize: 25 },
+      { ...fixture.deps, captchaUnits: () => captchaUnits },
+    );
+
+    const failures = vi.mocked(fixture.store.finalize).mock.calls.map(
+      ([input]) => (input.evidence as { failure: { units_spent: number } })
+        .failure,
+    );
+    expect(failures).toEqual([
+      expect.objectContaining({ type: "captcha", units_spent: 10 }),
+      expect.objectContaining({ type: "login", units_spent: 0 }),
+    ]);
+  });
+
+  it("classifies a streamed network failure as download", async () => {
+    const fixture = dependencies();
+    vi.mocked(fixture.pipeline.fetchAndUpload).mockRejectedValueOnce(
+      new DownloadError("incomplete", {
+        type: "network",
+        message: "Attachment request failed: socket hang up",
+      }),
+    );
+
+    await runRecoverySweep(
+      { mode: "apply", batchSize: 25 },
+      fixture.deps,
+    );
+
+    expect(fixture.store.finalize).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "error",
+        evidence: expect.objectContaining({
+          failure: expect.objectContaining({
+            stage: "download",
+            type: "network",
+            reason_code: "DOWNLOAD_INCOMPLETE",
+            units_spent: 0,
+          }),
         }),
       }),
     );

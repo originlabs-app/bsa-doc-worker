@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { AwAdapterError } from "../src/adapters/aw-solutions.js";
 import {
-  AW_CAPTCHA_SOLVE_UNIT_BUDGET_PER_ATTEMPT,
+  AW_CAPTCHA_SOLVE_UNIT_BUDGET_PER_RUN,
   AW_CAPTCHA_SOLVE_UNIT_COST,
   AwCaptchaSolveBudget,
   PlaywrightAwBrowserSession,
@@ -380,14 +380,22 @@ describe("followAnonymousWithdrawalLinkIfPresented", () => {
   });
 });
 
-type AwSurface = "choixDCE" | "avertissement" | "lots" | "submitted";
+type AwSurface =
+  | "choixDCE"
+  | "avertissement"
+  | "captcha_rejected"
+  | "lots"
+  | "submitted";
 
 // State-machine fake of the AW anonymous-withdrawal journey. `choixDCE` is
 // the 2026-07-20 evening wall: no RETRAIT ANONYME button, no login form, an
 // identification CAPTCHA the flow must NOT fund, and the plain
 // `dce.avertissement` link. Its landing page (`avertissement`) carries the
 // proven RETRAIT ANONYME + #texteCaptcha surface leading to the lot form.
-function fakeAwDiscoverFlow(initialSurface: "choixDCE" | "avertissement") {
+function fakeAwDiscoverFlow(
+  initialSurface: "choixDCE" | "avertissement",
+  afterAnonymous: "lots" | "captcha_rejected" = "lots",
+) {
   let surface: AwSurface = initialSurface;
   const clicked: string[] = [];
   const captchaSolveSurfaces: string[] = [];
@@ -461,7 +469,7 @@ function fakeAwDiscoverFlow(initialSurface: "choixDCE" | "avertissement") {
         },
         click: async () => {
           clicked.push("RETRAIT ANONYME");
-          if (surface === "avertissement") surface = "lots";
+          if (surface === "avertissement") surface = afterAnonymous;
         },
         locator: () => ({ first: () => ({ count: async () => 0 }) }),
       }),
@@ -470,6 +478,10 @@ function fakeAwDiscoverFlow(initialSurface: "choixDCE" | "avertissement") {
     waitForFunction: vi.fn(async () => {
       captchaSolveSurfaces.push(surface);
     }),
+    url: () =>
+      surface === "captcha_rejected"
+        ? "https://www.marches-publics.info/mpiaws/index.cfm?fuseaction=dce.avertissement&typeErreur=captcha"
+        : "https://www.marches-publics.info/mpiaws/index.cfm?fuseaction=dce.verifLotsDCE",
     content: async () => "<html>fixture listing</html>",
     evaluate: async () => "fixture-user-agent",
   };
@@ -546,6 +558,21 @@ describe("PlaywrightAwBrowserSession.discover", () => {
     expect(flow.captchaSolveSurfaces).toEqual(["avertissement"]);
     expect(flow.isLotFormSubmitted()).toBe(true);
     expect(discovery.consultationId).toBe("1848459");
+  });
+
+  it("reports AW's captcha rejection instead of a false lot-selection failure", async () => {
+    const flow = fakeAwDiscoverFlow("avertissement", "captcha_rejected");
+
+    await expect(sessionFor(flow).discover(request)).rejects.toMatchObject({
+      reasonCode: "CAPTCHA_UNSOLVED",
+      retryable: true,
+      failureStage: "captcha",
+      failureType: "captcha",
+      message: "AW rejected the Browserless CAPTCHA answer",
+    } satisfies Partial<AwAdapterError>);
+    expect(flow.captchaSolveSurfaces).toEqual(["avertissement"]);
+    expect(flow.isSelectAllChecked()).toBe(false);
+    expect(flow.isLotFormSubmitted()).toBe(false);
   });
 
   it("shares the ten-unit CAPTCHA budget across a whole recovery run", async () => {
@@ -630,7 +657,7 @@ describe("waitForCaptchaIfPresent", () => {
 
     expect(second.waitForFunction).not.toHaveBeenCalled();
     expect(budget.unitsCommitted).toBe(
-      AW_CAPTCHA_SOLVE_UNIT_BUDGET_PER_ATTEMPT,
+      AW_CAPTCHA_SOLVE_UNIT_BUDGET_PER_RUN,
     );
   });
 });
@@ -805,6 +832,8 @@ describe("PlaywrightAwBrowserSession failure diagnostics", () => {
     expect(error).toMatchObject({
       reasonCode: "ADAPTER_FAILURE",
       retryable: true,
+      failureStage: "navigation",
+      failureType: "network",
     });
     expect(String((error as Error).message)).toContain("at goto");
     expect(String((error as Error).message)).toContain("net::ERR_TIMED_OUT");

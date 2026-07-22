@@ -12,6 +12,10 @@ import type {
   BuyerProfileAdapter,
   EphemeralAttachment,
 } from "../ports.js";
+import type {
+  RecoveryFailureStage,
+  RecoveryFailureType,
+} from "../recovery/contracts.js";
 
 export interface AwBrowserDiscovery {
   consultationUrl: string;
@@ -27,13 +31,22 @@ export interface AwBrowserSession {
 }
 
 export class AwAdapterError extends Error {
+  readonly failureStage: RecoveryFailureStage | undefined;
+  readonly failureType: RecoveryFailureType | undefined;
+
   constructor(
     readonly reasonCode: ReasonCode,
     readonly retryable: boolean,
     message: string,
+    metadata: {
+      stage?: RecoveryFailureStage;
+      type?: RecoveryFailureType;
+    } = {},
   ) {
     super(message);
     this.name = "AwAdapterError";
+    this.failureStage = metadata.stage;
+    this.failureType = metadata.type;
   }
 }
 
@@ -148,6 +161,7 @@ export function parseAwListing(
       "ADAPTER_FAILURE",
       false,
       "AW listing did not expose an allowlisted attachment",
+      { stage: "manifest", type: "validation" },
     );
   }
 

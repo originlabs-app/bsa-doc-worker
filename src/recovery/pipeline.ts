@@ -13,8 +13,11 @@ import type {
 import {
   RecoveryTooLargeError,
   type RecoveryDocumentPipeline,
+  type RecoveryFailureStage,
+  type RecoveryFailureType,
   type RecoveryStoredDocument,
 } from "./contracts.js";
+import { sanitizeRecoveryFailureMessage } from "./failure.js";
 
 export interface RecoveryObjectStorage {
   upload(input: {
@@ -31,6 +34,22 @@ export interface RecoveryDocumentPipelineOptions {
   maxBytes: number;
   fetcher?: typeof fetch;
   logger?: WorkerLogger;
+}
+
+export class RecoveryPipelineError extends Error {
+  readonly failureMessage: string;
+
+  constructor(
+    readonly reasonCode: string,
+    readonly retryable: boolean,
+    readonly failureStage: RecoveryFailureStage,
+    readonly failureType: RecoveryFailureType,
+    message: string = reasonCode,
+  ) {
+    super(reasonCode);
+    this.name = "RecoveryPipelineError";
+    this.failureMessage = sanitizeRecoveryFailureMessage(message);
+  }
 }
 
 interface QuarantinedFile {
@@ -137,7 +156,12 @@ function validateDiscovery(input: {
     safeIds.length !== ephemeralIds.length ||
     safeIds.some((stableId) => !ephemeralIds.includes(stableId))
   ) {
-    throw new Error("RECOVERY_MANIFEST_MISMATCH");
+    throw new RecoveryPipelineError(
+      "RECOVERY_MANIFEST_MISMATCH",
+      false,
+      "manifest",
+      "validation",
+    );
   }
 }
 
@@ -189,15 +213,34 @@ export function createRecoveryDocumentPipeline(
         const documents: RecoveryStoredDocument[] = [];
         for (const attachment of discovery.ephemeralAttachments) {
           const quarantined = sink.files.get(attachment.stableId);
-          if (!quarantined?.receipt) throw new Error("RECOVERY_QUARANTINE_MISSING");
+          if (!quarantined?.receipt) {
+            throw new RecoveryPipelineError(
+              "RECOVERY_QUARANTINE_MISSING",
+              false,
+              "download",
+              "validation",
+            );
+          }
           const objectPath =
             `${target.companyId}/${target.tenderId}/${quarantined.fileName}`;
-          const uploaded = await options.storage.upload({
-            objectPath,
-            localPath: quarantined.localPath,
-            contentType: contentType(attachment.kind),
-            bytes: quarantined.receipt.bytes,
-          });
+          let uploaded: { created: boolean };
+          try {
+            uploaded = await options.storage.upload({
+              objectPath,
+              localPath: quarantined.localPath,
+              contentType: contentType(attachment.kind),
+              bytes: quarantined.receipt.bytes,
+            });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            throw new RecoveryPipelineError(
+              "RECOVERY_STORAGE_UPLOAD_FAILED",
+              true,
+              "upload",
+              "storage",
+              `Recovery storage upload failed: ${message}`,
+            );
+          }
           if (uploaded.created) createdPaths.push(objectPath);
           documents.push({
             fileName: quarantined.fileName,

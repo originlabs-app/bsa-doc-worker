@@ -8,6 +8,36 @@ export const RECOVERY_PORTALS = [
 
 export type RecoveryPortal = (typeof RECOVERY_PORTALS)[number];
 export type RecoveryDecision = "exact" | "strong" | "medium" | "low";
+export type RecoveryFailureStage =
+  | "identification"
+  | "browser_connect"
+  | "navigation"
+  | "authentication"
+  | "captcha"
+  | "lot_selection"
+  | "manifest"
+  | "download"
+  | "upload"
+  | "persistence";
+export type RecoveryFailureType =
+  | "login"
+  | "navigation"
+  | "captcha"
+  | "download"
+  | "network"
+  | "external_portal"
+  | "validation"
+  | "storage"
+  | "unknown";
+
+export interface RecoveryFailure {
+  stage: RecoveryFailureStage;
+  type: RecoveryFailureType;
+  message: string;
+  reason_code: string | null;
+  retryable: boolean | null;
+  units_spent: number;
+}
 export type RecoveryAttemptStatus =
   | "found"
   | "not_found"
@@ -44,6 +74,7 @@ export interface PortalSearchResult {
   blockedExternalHost?: string;
   requestCount?: number;
   errorCode?: string;
+  failure?: RecoveryFailure;
 }
 
 export interface MatchEvidence {
@@ -113,6 +144,11 @@ export interface RecoveryAttemptStore {
 }
 
 export class RecoveryTooLargeError extends Error {
+  readonly reasonCode = "RECOVERY_DOCUMENT_TOO_LARGE";
+  readonly retryable = false;
+  readonly failureStage = "download" as const;
+  readonly failureType = "validation" as const;
+
   constructor() {
     super("RECOVERY_DOCUMENT_TOO_LARGE");
     this.name = "RecoveryTooLargeError";

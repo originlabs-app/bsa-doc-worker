@@ -158,13 +158,17 @@ describe("createRecoveryDocumentPipeline", () => {
       maxBytes: 1_000,
     });
 
-    await expect(
-      pipeline.fetchAndUpload({
+    const error = await pipeline.fetchAndUpload({
         target,
         match,
         discovery: discovery(["one.pdf", "two.pdf"]),
-      }),
-    ).rejects.toThrow("storage failed");
+      }).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({
+      reasonCode: "RECOVERY_STORAGE_UPLOAD_FAILED",
+      failureStage: "upload",
+      failureType: "storage",
+      retryable: true,
+    });
     expect(objectStorage.remove).toHaveBeenCalledWith([
       `${target.companyId}/${target.tenderId}/one.pdf`,
     ]);
@@ -181,9 +185,15 @@ describe("createRecoveryDocumentPipeline", () => {
       maxBytes: 1_000,
     });
 
-    await expect(
-      pipeline.fetchAndUpload({ target, match, discovery: unsafe }),
-    ).rejects.toThrow("RECOVERY_MANIFEST_MISMATCH");
+    const error = await pipeline
+      .fetchAndUpload({ target, match, discovery: unsafe })
+      .catch((caught: unknown) => caught);
+    expect(error).toMatchObject({
+      reasonCode: "RECOVERY_MANIFEST_MISMATCH",
+      failureStage: "manifest",
+      failureType: "validation",
+      retryable: false,
+    });
     expect(objectStorage.upload).not.toHaveBeenCalled();
   });
 });
