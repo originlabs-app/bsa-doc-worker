@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { AwAdapterError } from "../src/adapters/aw-solutions.js";
 import {
-  AW_CAPTCHA_SOLVE_UNIT_BUDGET_PER_ATTEMPT,
+  AW_CAPTCHA_SOLVE_UNIT_BUDGET_PER_RUN,
   AW_CAPTCHA_SOLVE_UNIT_COST,
   AwCaptchaSolveBudget,
   PlaywrightAwBrowserSession,
@@ -630,7 +630,7 @@ describe("waitForCaptchaIfPresent", () => {
 
     expect(second.waitForFunction).not.toHaveBeenCalled();
     expect(budget.unitsCommitted).toBe(
-      AW_CAPTCHA_SOLVE_UNIT_BUDGET_PER_ATTEMPT,
+      AW_CAPTCHA_SOLVE_UNIT_BUDGET_PER_RUN,
     );
   });
 });
@@ -805,6 +805,8 @@ describe("PlaywrightAwBrowserSession failure diagnostics", () => {
     expect(error).toMatchObject({
       reasonCode: "ADAPTER_FAILURE",
       retryable: true,
+      failureStage: "navigation",
+      failureType: "network",
     });
     expect(String((error as Error).message)).toContain("at goto");
     expect(String((error as Error).message)).toContain("net::ERR_TIMED_OUT");

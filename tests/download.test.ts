@@ -3,7 +3,7 @@ import { Writable } from "node:stream";
 
 import { describe, expect, it, vi } from "vitest";
 
-import { streamAttachment } from "../src/download.js";
+import { DownloadError, streamAttachment } from "../src/download.js";
 import type {
   DocumentIngestionSink,
   EphemeralAttachment,
@@ -91,6 +91,30 @@ describe("streamAttachment", () => {
 
     expect(target.abort).toHaveBeenCalledOnce();
     expect(target.commit).not.toHaveBeenCalled();
+  });
+
+  it("types a request rejection as a safe network failure", async () => {
+    const fetcher = vi.fn(async () => {
+      throw new Error(
+        "fetch failed at https://downloads.awsolutions.fr/dce/attachment/file?token=must-not-leak",
+      );
+    });
+    const target = fakeSink();
+
+    const error = await streamAttachment(attachment(), target.sink, {
+      fetcher,
+    }).catch((caught: unknown) => caught) as unknown as DownloadError;
+
+    expect(error).toBeInstanceOf(DownloadError);
+    expect(error).toMatchObject({
+      reasonCode: "DOWNLOAD_INCOMPLETE",
+      failureStage: "download",
+      failureType: "network",
+      retryable: true,
+    });
+    expect(error.failureMessage).toContain("fetch failed");
+    expect(error.failureMessage).not.toContain("must-not-leak");
+    expect(target.sink.open).not.toHaveBeenCalled();
   });
 
   it("rejects a declared response above the configured byte cap before opening storage", async () => {

@@ -12,13 +12,22 @@ import {
   type AwBrowserDiscovery,
   type AwBrowserSession,
 } from "./aw-solutions.js";
+import { sanitizeRecoveryFailureMessage } from "../recovery/failure.js";
+import type {
+  RecoveryFailureStage,
+  RecoveryFailureType,
+} from "../recovery/contracts.js";
 
 const DEFAULT_TIMEOUT_MS = 45_000;
 
-// Browserless bills a CAPTCHA solve at 10 units. Each portal attempt funds at
-// most one solve; the worker's two-attempt cap bounds a tender at 20 units.
+// Browserless bills a CAPTCHA solve at 10 units. Autonomous recovery injects
+// one shared budget instance for the whole one-shot run.
 export const AW_CAPTCHA_SOLVE_UNIT_COST = 10;
-export const AW_CAPTCHA_SOLVE_UNIT_BUDGET_PER_ATTEMPT = 10;
+export const AW_CAPTCHA_SOLVE_UNIT_BUDGET_PER_RUN = 10;
+// Compatibility alias for the legacy manifest worker, which creates its own
+// budget for each standalone discovery attempt.
+export const AW_CAPTCHA_SOLVE_UNIT_BUDGET_PER_ATTEMPT =
+  AW_CAPTCHA_SOLVE_UNIT_BUDGET_PER_RUN;
 
 export class AwCaptchaSolveBudget {
   private committedUnits = 0;
@@ -30,12 +39,13 @@ export class AwCaptchaSolveBudget {
   commitSolve(): void {
     if (
       this.committedUnits + AW_CAPTCHA_SOLVE_UNIT_COST >
-      AW_CAPTCHA_SOLVE_UNIT_BUDGET_PER_ATTEMPT
+      AW_CAPTCHA_SOLVE_UNIT_BUDGET_PER_RUN
     ) {
       throw new AwAdapterError(
         "CAPTCHA_UNSOLVED",
         true,
-        "AW CAPTCHA solve budget for this attempt is exhausted",
+        "AW CAPTCHA solve budget for this run is exhausted",
+        { stage: "captcha", type: "captcha" },
       );
     }
     this.committedUnits += AW_CAPTCHA_SOLVE_UNIT_COST;
@@ -76,7 +86,37 @@ function extractConsultationId(rawUrl: string): string {
     "PROFILE_LINK_NOT_FINAL",
     false,
     "AW consultation URL does not contain IDM",
+    { stage: "identification", type: "validation" },
   );
+}
+
+type AwFlowStep =
+  | "connect"
+  | "goto"
+  | "entry_surface"
+  | "captcha"
+  | "anonymous_withdrawal"
+  | "authenticate"
+  | "lot_selection"
+  | "listing";
+
+function failureMetadata(
+  step: AwFlowStep,
+  reasonCode?: string,
+): { stage: RecoveryFailureStage; type: RecoveryFailureType } {
+  if (/CAPTCHA/.test(reasonCode ?? "") || step === "captcha") {
+    return { stage: "captcha", type: "captcha" };
+  }
+  if (/AUTHENTICATION/.test(reasonCode ?? "") || step === "authenticate") {
+    return { stage: "authentication", type: "login" };
+  }
+  if (step === "connect") return { stage: "browser_connect", type: "network" };
+  if (step === "goto") return { stage: "navigation", type: "network" };
+  if (step === "lot_selection") {
+    return { stage: "lot_selection", type: "navigation" };
+  }
+  if (step === "listing") return { stage: "manifest", type: "validation" };
+  return { stage: "navigation", type: "navigation" };
 }
 
 // The Browserless.solveCaptcha CDP command is bounded independently of the
@@ -392,7 +432,7 @@ export class PlaywrightAwBrowserSession implements AwBrowserSession {
       this.options.captchaBudget ?? new AwCaptchaSolveBudget();
     // Names the flow step in every unexpected failure so a prod 'error'
     // attempt is never mute about where AW actually broke.
-    let step = "connect";
+    let step: AwFlowStep = "connect";
     try {
       browser = await chromium.connectOverCDP(
         buildBrowserlessEndpoint(this.options.browserlessToken),
@@ -505,12 +545,23 @@ export class PlaywrightAwBrowserSession implements AwBrowserSession {
         userAgent: await page.evaluate(() => navigator.userAgent),
       };
     } catch (error) {
-      if (error instanceof AwAdapterError) throw error;
-      const message = error instanceof Error ? error.message : String(error);
+      if (error instanceof AwAdapterError) {
+        const metadata = failureMetadata(step, error.reasonCode);
+        throw new AwAdapterError(
+          error.reasonCode,
+          error.retryable,
+          sanitizeRecoveryFailureMessage(error.message),
+          metadata,
+        );
+      }
+      const message = sanitizeRecoveryFailureMessage(
+        error instanceof Error ? error.message : String(error),
+      );
       throw new AwAdapterError(
         "ADAPTER_FAILURE",
         true,
         `Browserless AW discovery failed at ${step}: ${message}`.slice(0, 300),
+        failureMetadata(step),
       );
     } finally {
       await browser?.close().catch(() => undefined);
